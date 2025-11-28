@@ -1,6 +1,6 @@
 # Composite LLM Research
 
-This repository contains research and implementation for Composite LLM patterns (MoA, Think, RLM) compatible with `litellm`.
+This repository contains research and implementation for Composite LLM patterns (MoA, CoT, Think Tool) compatible with `litellm`.
 
 See [DESIGN.md](DESIGN.md) for detailed architecture and usage.
 
