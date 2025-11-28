@@ -1,10 +1,37 @@
 import os
-import pandas as pd
+import textwrap
 from dotenv import load_dotenv
 import litellm
 
 from composite_llm.provider import CompositeLLMProvider
 from composite_llm.observability import log_success, log_failure
+
+
+# ANSI colors for pretty terminal output
+class Colors:
+    HEADER = "\033[95m"
+    BLUE = "\033[94m"
+    CYAN = "\033[96m"
+    GREEN = "\033[92m"
+    YELLOW = "\033[93m"
+    RED = "\033[91m"
+    BOLD = "\033[1m"
+    DIM = "\033[2m"
+    RESET = "\033[0m"
+
+
+def format_response(content: str, width: int = 80) -> str:
+    """Format response text with word wrapping and indentation."""
+    lines = content.split("\n")
+    formatted_lines = []
+    for line in lines:
+        if line.strip():
+            wrapped = textwrap.fill(line, width=width, subsequent_indent="  ")
+            formatted_lines.append(wrapped)
+        else:
+            formatted_lines.append("")
+    return "\n".join(formatted_lines)
+
 
 # Load environment variables
 load_dotenv()
@@ -102,18 +129,28 @@ def run_demo():
             "model": MODELS["llama-8b"],
             "type": "baseline",
         },
-        # Think Strategy (System 2)
+        # Chain of Thought Strategy (two-step prompting with explicit reasoning)
+        # Note: "think" is kept as alias for backwards compatibility
         {
-            "name": "Think + Llama-70b",
-            "model": f"composite/think/{MODELS['llama-70b']}",
+            "name": "CoT + Llama-70b",
+            "model": f"composite/cot/{MODELS['llama-70b']}",
             "type": "composite",
-            "params": {"include_thoughts": True},
+            "params": {},
         },
         {
-            "name": "Think + Llama-8b",
-            "model": f"composite/think/{MODELS['llama-8b']}",
+            "name": "CoT + Llama-8b",
+            "model": f"composite/cot/{MODELS['llama-8b']}",
             "type": "composite",
-            "params": {"include_thoughts": True},
+            "params": {},
+        },
+        # Think Tool Strategy (Anthropic's pattern for agentic workflows)
+        # Best for: tool output analysis, policy compliance, sequential decisions
+        # See: https://www.anthropic.com/engineering/claude-think-tool
+        {
+            "name": "ThinkTool + Llama-70b",
+            "model": f"composite/think_tool/{MODELS['llama-70b']}",
+            "type": "composite",
+            "params": {"include_think_prompt": True},
         },
         # MoA Strategy
         {
@@ -127,10 +164,32 @@ def run_demo():
     results = []
 
     for task in tasks:
-        print(f"\n=== Task: {task['prompt']} ({task['category']}) ===")
+        print(f"\n{Colors.BOLD}{Colors.HEADER}{'═' * 70}{Colors.RESET}")
+        print(f"{Colors.BOLD}{Colors.HEADER}📝 Task: {task['prompt']}{Colors.RESET}")
+        print(f"{Colors.DIM}   Category: {task['category']}{Colors.RESET}")
+        print(f"{Colors.HEADER}{'═' * 70}{Colors.RESET}")
 
         for config in configs:
-            print(f"\n>> Running {config['name']}...")
+            config_type = config.get("type", "unknown")
+            if config_type == "baseline":
+                icon = "🔹"
+                color = Colors.BLUE
+            elif "CoT" in config["name"]:
+                icon = "🧠"
+                color = Colors.CYAN
+            elif "ThinkTool" in config["name"]:
+                icon = "💭"
+                color = Colors.YELLOW
+            elif "MoA" in config["name"]:
+                icon = "🤝"
+                color = Colors.GREEN
+            else:
+                icon = "▶"
+                color = Colors.RESET
+
+            print(f"\n{color}{Colors.BOLD}{icon} {config['name']}{Colors.RESET}")
+            print(f"{Colors.DIM}{'─' * 50}{Colors.RESET}")
+
             try:
                 # Prepare args
                 kwargs = {}
@@ -145,44 +204,59 @@ def run_demo():
 
                 content = resp.choices[0].message.content
 
-                # For display in terminal, we might want to trim or show structure
-                print(
-                    f"[{config['name']}] Response:\n{content[:500]}..."
-                    if len(content) > 500
-                    else f"[{config['name']}] Response:\n{content}"
-                )
+                # Format and display the full response
+                formatted = format_response(content, width=70)
+                print(formatted)
 
                 # Save for summary
-                # If it's a Think strategy, content includes thoughts. We might want to separate them for the table if possible,
-                # but currently they are merged text.
                 results.append(
                     {
-                        "Task": task["prompt"],
-                        "Configuration": config["name"],
-                        "Response Snippet": content[:100].replace("\n", " ") + "...",
+                        "config": config["name"],
+                        "task": task["prompt"],
+                        "response": content,
+                        "success": True,
                     }
                 )
 
             except Exception as e:
-                print(f"Error running {config['name']}: {e}")
+                print(f"{Colors.RED}❌ Error: {e}{Colors.RESET}")
                 results.append(
                     {
-                        "Task": task["prompt"],
-                        "Configuration": config["name"],
-                        "Response Snippet": f"ERROR: {str(e)}",
+                        "config": config["name"],
+                        "task": task["prompt"],
+                        "response": f"ERROR: {str(e)}",
+                        "success": False,
                     }
                 )
 
-    print("\n\n=== Summary Table ===")
-    df = pd.DataFrame(results)
-    # Use tabulate format for nicer output if pandas supports it or just print
-    try:
-        print(df.to_markdown(index=False))
-    except ImportError:
-        print(df.to_string(index=False))
+    # Summary section
+    print(f"\n\n{Colors.BOLD}{Colors.HEADER}{'═' * 70}{Colors.RESET}")
+    print(f"{Colors.BOLD}{Colors.HEADER}📊 SUMMARY{Colors.RESET}")
+    print(f"{Colors.HEADER}{'═' * 70}{Colors.RESET}\n")
 
+    for task in tasks:
+        task_results = [r for r in results if r["task"] == task["prompt"]]
+        print(f"{Colors.BOLD}Task: {task['prompt']}{Colors.RESET}\n")
+
+        for r in task_results:
+            status = (
+                f"{Colors.GREEN}✓{Colors.RESET}"
+                if r["success"]
+                else f"{Colors.RED}✗{Colors.RESET}"
+            )
+            # Extract just the final answer (last line or last portion)
+            answer = r["response"].strip().split("\n")[-1]
+            if len(answer) > 100:
+                answer = "..." + answer[-100:]
+            print(f"  {status} {Colors.BOLD}{r['config']:30}{Colors.RESET} → {answer}")
+        print()
+
+    print(f"{Colors.DIM}{'─' * 70}{Colors.RESET}")
     print(
-        "\nCheck 'llm_logs.jsonl' for logs and run 'streamlit run dashboard.py' to view them."
+        f"{Colors.CYAN}💡 Tip: Check 'llm_logs.jsonl' for detailed logs{Colors.RESET}"
+    )
+    print(
+        f"{Colors.CYAN}💡 Run 'streamlit run dashboard.py' for interactive dashboard{Colors.RESET}"
     )
 
 

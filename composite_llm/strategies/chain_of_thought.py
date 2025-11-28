@@ -1,9 +1,28 @@
+"""
+Chain of Thought Strategy
+
+This strategy implements a two-step prompting approach:
+1. Force the model to generate explicit reasoning in <thinking> tags
+2. Feed the thoughts back and generate a final answer
+
+This is NOT the same as Anthropic's "think" tool - see think_tool.py for that.
+This is closer to "extended thinking" or chain-of-thought prompting.
+"""
+
 from typing import List, Dict, Any
 from .base import BaseStrategy
-import litellm
+from .think_tool import strip_thinking_tags
 
 
-class ThinkStrategy(BaseStrategy):
+class ChainOfThoughtStrategy(BaseStrategy):
+    """
+    A strategy that forces explicit chain-of-thought reasoning before answering.
+    
+    Uses two LLM calls:
+    1. Generate thoughts with explicit reasoning
+    2. Generate final answer based on those thoughts
+    """
+    
     def execute(
         self,
         messages: List[Dict[str, str]],
@@ -32,10 +51,11 @@ class ThinkStrategy(BaseStrategy):
                 0, {"role": "system", "content": think_instructions}
             )
 
-        thought_response = litellm.completion(
+        thought_response = self.simple_completion(
             model=target_model,
             messages=thought_messages,
             stop=["</thinking>"],  # Stop after thinking
+            **litellm_params,
         )
 
         thoughts = thought_response.choices[0].message.content
@@ -58,20 +78,20 @@ class ThinkStrategy(BaseStrategy):
             }
         )
 
-        final_response = litellm.completion(
-            model=target_model, messages=final_messages, **optional_params
+        final_response = self.simple_completion(
+            model=target_model, messages=final_messages, **litellm_params
         )
 
-        # We might want to prepend the thoughts to the final content if the user wants to see them
-        # For now, let's just return the final answer, effectively "hiding" the thinking step
-        # (or we could return it in a specific format)
-
-        # Optional: Include thoughts in the response metadata or prepend
-        if optional_params.get("include_thoughts", False):
-            final_response.choices[
-                0
-            ].message.content = (
-                f"{thoughts}\n\n{final_response.choices[0].message.content}"
+        # Strip any <thinking> tags the model may have echoed back
+        if final_response.choices[0].message.content:
+            final_response.choices[0].message.content = strip_thinking_tags(
+                final_response.choices[0].message.content
             )
 
+        # Store thoughts in reasoning_content field (like o1/DeepSeek models do)
+        # Extract just the thinking content without the tags
+        raw_thoughts = strip_thinking_tags(thoughts.replace("<thinking>", "").replace("</thinking>", ""))
+        final_response.choices[0].message.reasoning_content = raw_thoughts
+
         return final_response
+

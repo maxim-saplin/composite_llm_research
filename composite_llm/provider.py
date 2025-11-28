@@ -19,9 +19,19 @@ class CompositeLLMProvider:
         # Simple dynamic loading based on name
         new_strategy: BaseStrategy
         if strategy_name == "think":
-            from .strategies.think import ThinkStrategy
+            # Legacy alias - maps to chain_of_thought for backwards compatibility
+            from .strategies.chain_of_thought import ChainOfThoughtStrategy
 
-            new_strategy = ThinkStrategy()
+            new_strategy = ChainOfThoughtStrategy()
+        elif strategy_name == "cot" or strategy_name == "chain_of_thought":
+            from .strategies.chain_of_thought import ChainOfThoughtStrategy
+
+            new_strategy = ChainOfThoughtStrategy()
+        elif strategy_name == "think_tool":
+            # Anthropic's "think" tool pattern for agentic workflows
+            from .strategies.think_tool import ThinkToolStrategy
+
+            new_strategy = ThinkToolStrategy()
         elif strategy_name == "moa":
             from .strategies.moa import MoAStrategy
 
