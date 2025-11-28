@@ -28,11 +28,11 @@ graph LR
     Strategy -->|Select| RLM[RLM / Refinement]
     end
     
-    MoA -->|Parallel Calls| Proposers[Proposer Models\n(GPT-3.5, Haiku, etc.)]
-    MoA -->|Synthesis| Aggregator[Aggregator Model\n(GPT-4o)]
+    MoA -->|Parallel Calls| Proposers["Proposer Models\n(GPT-3.5, Haiku, etc.)"]
+    MoA -->|Synthesis| Aggregator["Aggregator Model\n(GPT-4o)"]
     
-    Think -->|Thought Gen| Thinker[Model (Reasoning)]
-    Think -->|Final Ans| Answerer[Model (Answering)]
+    Think -->|Thought Gen| Thinker["Model (Reasoning)"]
+    Think -->|Final Ans| Answerer["Model (Answering)"]
 ```
 
 ### Components
@@ -128,3 +128,89 @@ composite_llm_research/
 └── DESIGN.md             # This file
 ```
 
+---
+
+## 7. Quick Start & Testing
+
+This section explains how to set up the environment using `uv`, run the demo, and view the observability dashboard.
+
+### 7.1 Prerequisites & Setup
+
+Ensure you have `uv` installed. If not, install it via `curl -LsSf https://astral.sh/uv/install.sh | sh`.
+
+1.  **Create a virtual environment**:
+    ```bash
+    uv venv
+    source .venv/bin/activate
+    ```
+
+2.  **Install dependencies**:
+    ```bash
+    uv pip install -e .
+    ```
+
+### 7.2 Environment Configuration
+
+Create a `.env` file in the root directory (you can copy `sample.env`):
+
+```bash
+cp sample.env .env
+```
+
+Edit `.env` to add your API keys. You can use standard provider keys (e.g., `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`) or `LITELLM_API_KEY` for general use.
+
+Example `.env`:
+```text
+LITELLM_API_KEY=csk-...
+MODEL=cerebras/zai-glm-4.6
+```
+
+*Note: If no API key is provided, `demo.py` will run in **Mock Mode**, simulating responses without making actual network calls.*
+
+### 7.3 Running the Demo
+
+The `demo.py` script showcases two strategies: **Think** (System 2 reasoning) and **MoA** (Mixture of Agents).
+
+```bash
+python demo.py
+```
+
+Expected output:
+1.  **Think Strategy**: It will query the model (or mock) asking for thoughts before the final answer.
+2.  **MoA Strategy**: It will simulate querying multiple proposer models and then aggregating their responses.
+3.  **Logging**: All interactions are automatically logged to `llm_logs.jsonl` in the current directory.
+
+### 7.4 Running the Observability Dashboard
+
+To visualize the metrics (latency, token usage, model distribution), start the Streamlit dashboard:
+
+```bash
+streamlit run dashboard.py
+```
+
+This will open a local web server (usually at `http://localhost:8501`) where you can see:
+-   Total calls and error rates.
+-   Latency distributions.
+-   A table of recent logs (which updates as you run more demos).
+
+### 7.5 Manual Testing (Python Shell)
+
+You can also test interactively by importing the wrapper from `demo.py`:
+
+```python
+import os
+import sys
+sys.path.append(os.getcwd())
+from demo import composite_completion
+
+# Ensure API key is set
+# os.environ["OPENAI_API_KEY"] = "..."
+
+# Test a simple composite call
+resp = composite_completion(
+    model="composite/think/gpt-4o",
+    messages=[{"role": "user", "content": "Why is the sky blue?"}],
+    optional_params={"include_thoughts": True}
+)
+print(resp.choices[0].message.content)
+```
