@@ -1,0 +1,130 @@
+# Composite LLM: Idea & Design Document
+
+## 1. Overview
+
+**Composite LLM** is an extension architecture for `litellm` that enables "Logical Models"—abstractions that look like a single LLM to the client but actually orchestrate multiple underlying LLM calls behind the scenes.
+
+The goal is to provide advanced capabilities like **Mixture-of-Agents (MoA)**, **System 2 Thinking**, and **Reinforcement Learning with Models (RLM)** while maintaining a unified, standard chat completion API.
+
+### Core Value Proposition
+- **Unified Interface**: Client code remains unchanged. Switching from `gpt-4o` to a complex `composite/moa/gpt-4o` pipeline requires only a config string change.
+- **Model Agnostic**: Strategies can mix and match models from different providers (e.g., Anthropic for thinking, OpenAI for synthesis).
+- **Introspection**: Built-in observability to track the "hidden" cost and latency of composite operations.
+
+---
+
+## 2. Architecture
+
+The system is built around a **Custom Provider** pattern compatible with `litellm`.
+
+```mermaid
+graph LR
+    Client[Client App] -->|litellm.completion| Proxy[Composite Provider]
+    Proxy -->|Router| Strategy[Strategy Execution]
+    
+    subgraph Strategies
+    Strategy -->|Select| MoA[Mixture of Agents]
+    Strategy -->|Select| Think[Think Tool]
+    Strategy -->|Select| RLM[RLM / Refinement]
+    end
+    
+    MoA -->|Parallel Calls| Proposers[Proposer Models\n(GPT-3.5, Haiku, etc.)]
+    MoA -->|Synthesis| Aggregator[Aggregator Model\n(GPT-4o)]
+    
+    Think -->|Thought Gen| Thinker[Model (Reasoning)]
+    Think -->|Final Ans| Answerer[Model (Answering)]
+```
+
+### Components
+
+1.  **CompositeLLMProvider**: The entry point. It intercepts calls where the model name starts with `composite/`. It parses the strategy and configuration from the model string.
+    *   *Format*: `composite/<strategy>/<base_model>`
+    *   *Example*: `composite/moa/gpt-4o`
+
+2.  **BaseStrategy**: An abstract base class defining the contract for all orchestration logic.
+    *   `execute(messages, model_config, optional_params, litellm_params)`
+
+3.  **Observability Layer**: A callback system that logs granular metrics (latency, token usage, cost) for both the composite call and the sub-calls.
+
+---
+
+## 3. Supported Strategies
+
+### A. Mixture-of-Agents (MoA)
+Inspired by recent research (e.g., Together AI's MoA), this strategy leverages the collective intelligence of multiple models.
+
+*   **Workflow**:
+    1.  **Proposer Phase**: The user query is sent in parallel to a set of diverse, cheaper "proposer" models (e.g., Llama-3, Haiku, GPT-3.5).
+    2.  **Aggregator Phase**: The responses from all proposers are collected and injected into the context of a capable "aggregator" model (e.g., GPT-4o or Claude 3.5 Sonnet).
+    3.  **Synthesis**: The aggregator generates the final response, correcting errors and combining insights.
+*   **Config**: `proposers` (list of models), `aggregator` (base model).
+
+### B. Think Strategy (System 2)
+Emulates the "thinking" process of reasoning models.
+
+*   **Workflow**:
+    1.  **Thought Generation**: The model is prompted to output an internal monologue inside `<thinking>` tags, analyzing the problem before answering.
+    2.  **Extraction**: The thought block is parsed (and optionally hidden or stored).
+    3.  **Final Response**: The model (or a different one) is prompted to provide the final answer based on the generated thoughts.
+*   **Benefits**: Reduces hallucination on complex logic tasks.
+
+### C. RLM (Reinforcement Learning with Models) / Refinement
+*Planned for future iteration.*
+
+*   **Workflow**:
+    1.  **Generate**: Initial draft.
+    2.  **Critique/Reward**: A separate "Reward Model" or prompt evaluates the draft against criteria.
+    3.  **Refine**: If the score is low, the model is prompted to improve the draft based on the critique. This loop repeats until a threshold is met.
+
+---
+
+## 4. Technical Implementation Details
+
+### Integration with LiteLLM
+We utilize `litellm`'s custom provider capabilities.
+
+```python
+# Pseudo-code usage
+resp = litellm.completion(
+    model="composite/moa/gpt-4o",
+    messages=[{"role": "user", "content": "Complex query..."}],
+    # Custom params passed through
+    proposers=["claude-3-haiku", "gpt-3.5-turbo"]
+)
+```
+
+### Tool Call Handling
+Handling tool calls in a composite architecture is non-trivial.
+
+*   **Strategy 1 (Pass-through)**: If the underlying model (e.g., the Aggregator in MoA) generates a tool call, it is bubbled up to the client. The client executes the tool and sends the result back. The Composite Provider must be state-aware to route the tool output back to the correct step in the strategy.
+*   **Strategy 2 (Internal Execution)**: The Composite Provider handles the tool execution internally (agentic loop) and only returns the final text result. *This is more complex but hides implementation details.*
+*   **Current Design**: Focuses on Text-to-Text. Tool calls generated by the *final* model in the chain will be returned to the client.
+
+---
+
+## 5. Observability & Dashboard
+
+Since one API call now triggers $N$ calls, cost and latency transparency is critical.
+
+*   **Logging**: All sub-calls are logged to a structured `jsonl` file.
+*   **Dashboard (Streamlit)**:
+    *   **Aggregated Metrics**: Total cost per composite call.
+    *   **Trace View**: Timeline showing the parallel execution of MoA proposers or the sequential steps of RLM.
+    *   **Latency Analysis**: Identify which sub-model is the bottleneck.
+
+## 6. Directory Structure
+
+```text
+composite_llm_research/
+├── composite_llm/
+│   ├── provider.py       # Main Provider Class
+│   ├── strategies/       # Strategy Implementations
+│   │   ├── base.py
+│   │   ├── moa.py
+│   │   └── think.py
+│   └── observability.py  # Logging Callbacks
+├── dashboard.py          # Streamlit Visualization
+├── demo.py               # Usage Examples
+└── DESIGN.md             # This file
+```
+
