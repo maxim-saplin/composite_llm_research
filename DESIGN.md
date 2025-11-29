@@ -59,7 +59,20 @@ Inspired by recent research (e.g., Together AI's MoA), this strategy leverages t
     3.  **Synthesis**: The aggregator generates the final response, correcting errors and combining insights.
 *   **Config**: `proposers` (list of models), `aggregator` (base model).
 
-### B. Think Strategy (System 2)
+### B. Council Strategy (LLM Council-style)
+Inspired by Andrej Karpathy's [LLM Council](https://github.com/karpathy/llm-council), this strategy runs a 3-stage pipeline of multiple models.
+
+*   **Workflow**:
+    1.  **First Opinions (Stage 1)**: The user query (full conversation) is sent individually to a set of council models. Each model returns its own answer.
+    2.  **Cross-review & Ranking (Stage 2)**: Each (review) model is shown all anonymized answers (e.g., “Assistant 1”, “Assistant 2”, …) and asked to critique and rank them by accuracy and insight.
+    3.  **Chairman Synthesis (Stage 3)**: A designated chairman model receives the original conversation plus a formatted summary of Stage 1 answers and Stage 2 reviews, and produces the final answer.
+*   **Config** (via `optional_params`):
+    *   `council_models`: list of council member models used in Stage 1 (and by default Stage 2).
+    *   `chairman_model`: model used in Stage 3 to synthesize the final answer (defaults to the `<model>` part of `composite/council/<model>`).
+    *   `review_models` (optional): list of models to use as reviewers in Stage 2 (defaults to `council_models`).
+    *   `max_council_size` (optional): cap on the number of council members/reviewers to use.
+
+### C. Think Strategy (System 2)
 Emulates the "thinking" process of reasoning models.
 
 *   **Workflow**:
@@ -68,7 +81,7 @@ Emulates the "thinking" process of reasoning models.
     3.  **Final Response**: The model (or a different one) is prompted to provide the final answer based on the generated thoughts.
 *   **Benefits**: Reduces hallucination on complex logic tasks.
 
-### C. RLM (Reinforcement Learning with Models) / Refinement
+### D. RLM (Reinforcement Learning with Models) / Refinement
 *Planned for future iteration.*
 
 *   **Workflow**:

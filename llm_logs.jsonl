@@ -1,0 +1,13 @@
+{"timestamp": "2025-11-29T10:59:50.813264", "status": "failure", "model": "llama-3.3-70b", "duration_seconds": 0.287111, "error": "None"}
+{"timestamp": "2025-11-29T10:59:50.834580", "status": "failure", "model": "llama3.1-8b", "duration_seconds": 0.017819, "error": "None"}
+{"timestamp": "2025-11-29T10:59:50.859556", "status": "failure", "model": "llama-3.3-70b", "duration_seconds": 0.018486, "error": "None"}
+{"timestamp": "2025-11-29T10:59:50.879984", "status": "failure", "model": "llama3.1-8b", "duration_seconds": 0.017199, "error": "None"}
+{"timestamp": "2025-11-29T10:59:50.900959", "status": "failure", "model": "llama-3.3-70b", "duration_seconds": 0.017776, "error": "None"}
+{"timestamp": "2025-11-29T10:59:50.922252", "status": "failure", "model": "llama3.1-8b", "duration_seconds": 0.016952, "error": "None"}
+{"timestamp": "2025-11-29T10:59:50.940969", "status": "failure", "model": "qwen-3-32b", "duration_seconds": 0.015777, "error": "None"}
+{"timestamp": "2025-11-29T10:59:50.967685", "status": "failure", "model": "llama-3.3-70b", "duration_seconds": 0.02369, "error": "None"}
+{"timestamp": "2025-11-29T10:59:50.990989", "status": "failure", "model": "llama3.1-8b", "duration_seconds": 0.017731, "error": "None"}
+{"timestamp": "2025-11-29T10:59:51.013259", "status": "failure", "model": "qwen-3-32b", "duration_seconds": 0.018874, "error": "None"}
+{"timestamp": "2025-11-29T10:59:51.033561", "status": "failure", "model": "llama3.1-8b", "duration_seconds": 0.017398, "error": "None"}
+{"timestamp": "2025-11-29T10:59:51.055055", "status": "failure", "model": "qwen-3-32b", "duration_seconds": 0.01819, "error": "None"}
+{"timestamp": "2025-11-29T10:59:51.075443", "status": "failure", "model": "llama-3.3-70b", "duration_seconds": 0.017755, "error": "None"}

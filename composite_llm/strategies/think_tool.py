@@ -24,7 +24,9 @@ NOT suited for:
 
 import json
 import re
+import time
 from typing import List, Dict, Any, Optional
+
 from .base import BaseStrategy
 
 
@@ -207,6 +209,17 @@ class ThinkToolStrategy(BaseStrategy):
     ) -> Any:
         target_model = model_config or "gpt-4o"
         
+        trace_recorder = optional_params.get("trace_recorder")
+        trace_root_id = optional_params.get("trace_root_node_id")
+        strategy_node_id = None
+        if trace_recorder and trace_root_id is not None:
+            strategy_node_id = trace_recorder.add_node(
+                step_type="strategy",
+                parent_id=trace_root_id,
+                model=target_model,
+                content_preview="ThinkTool strategy execution",
+            )
+        
         # Get configuration options
         user_tools = optional_params.get("tools", [])
         domain = optional_params.get("domain")
@@ -235,15 +248,30 @@ class ThinkToolStrategy(BaseStrategy):
         collected_thoughts = []
         
         # Agentic loop - handle tool calls including think
-        for _ in range(max_iterations):
+        last_response = None
+        for iteration in range(max_iterations):
+            start = time.time()
             response = self.simple_completion(
                 model=target_model,
                 messages=working_messages,
                 tools=all_tools if all_tools else None,
                 **{k: v for k, v in litellm_params.items() if k not in ["tools"]}
             )
+            duration = time.time() - start
+            last_response = response
             
             message = response.choices[0].message
+
+            if trace_recorder:
+                trace_recorder.add_node(
+                    step_type="llm_call",
+                    parent_id=strategy_node_id,
+                    model=target_model,
+                    role="assistant",
+                    content_preview=(message.content or "")[:200],
+                    duration_seconds=duration,
+                    extra={"iteration": iteration},
+                )
             
             # Check if there are tool calls
             if not hasattr(message, "tool_calls") or not message.tool_calls:
@@ -287,19 +315,23 @@ class ThinkToolStrategy(BaseStrategy):
                             collected_thoughts.append(thought)
                     except json.JSONDecodeError:
                         pass
+                    tool_result_content = "Thought recorded."
                     tool_result = {
                         "role": "tool",
                         "tool_call_id": tool_call.id,
-                        "content": "Thought recorded."
+                        "content": tool_result_content,
                     }
                 else:
                     # For other tools, we'd need a tool executor
                     # For now, return an error indicating tool not implemented
+                    tool_result_content = (
+                        f"Error: Tool '{tool_name}' execution not implemented in this strategy. "
+                        f"Provide a tool executor via optional_params['tool_executor']."
+                    )
                     tool_result = {
                         "role": "tool", 
                         "tool_call_id": tool_call.id,
-                        "content": f"Error: Tool '{tool_name}' execution not implemented in this strategy. "
-                                   f"Provide a tool executor via optional_params['tool_executor']."
+                        "content": tool_result_content,
                     }
                     
                     # Check if user provided a tool executor
@@ -307,13 +339,26 @@ class ThinkToolStrategy(BaseStrategy):
                     if tool_executor and callable(tool_executor):
                         try:
                             result = tool_executor(tool_name, tool_call.function.arguments)
-                            tool_result["content"] = str(result)
+                            tool_result_content = str(result)
+                            tool_result["content"] = tool_result_content
                         except Exception as e:
-                            tool_result["content"] = f"Error executing {tool_name}: {str(e)}"
+                            tool_result_content = f"Error executing {tool_name}: {str(e)}"
+                            tool_result["content"] = tool_result_content
                 
+                if trace_recorder:
+                    trace_recorder.add_node(
+                        step_type="tool_call",
+                        parent_id=strategy_node_id,
+                        model=None,
+                        role="tool",
+                        content_preview=tool_result_content[:200],
+                        extra={"tool_name": tool_name},
+                    )
+
                 working_messages.append(tool_result)
         
         # Max iterations reached, strip any <thinking> tags and return last response
+        response = last_response
         if response and response.choices:
             message = response.choices[0].message
             if message.content:

@@ -159,6 +159,16 @@ def run_demo():
             "type": "composite",
             "params": {"proposers": [MODELS["llama-8b"], MODELS["qwen-32b"]]},
         },
+        # Council Strategy (LLM Council-style 3-stage flow)
+        {
+            "name": "Council (Chair: 70b, Council: [8b, Qwen])",
+            "model": f"composite/council/{MODELS['llama-70b']}",
+            "type": "composite",
+            "params": {
+                "chairman_model": MODELS["llama-70b"],
+                "council_models": [MODELS["llama-8b"], MODELS["qwen-32b"]],
+            },
+        },
     ]
 
     results = []

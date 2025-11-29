@@ -53,6 +53,14 @@ def log_success(kwargs, response_obj, start_time, end_time):
             # "output_snippet": str(response_obj.choices[0].message.content)[:100]
         }
 
+        # Optional trace graph for composite calls
+        trace = kwargs.get("trace")
+        if trace:
+            # Attach full trace object and top-level trace_id for convenience
+            log_entry["trace"] = trace
+            if isinstance(trace, dict) and "trace_id" in trace:
+                log_entry["trace_id"] = trace["trace_id"]
+
         with open(LOG_FILE, "a") as f:
             f.write(json.dumps(log_entry) + "\n")
 

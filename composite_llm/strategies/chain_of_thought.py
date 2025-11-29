@@ -10,6 +10,8 @@ This is closer to "extended thinking" or chain-of-thought prompting.
 """
 
 from typing import List, Dict, Any
+import time
+
 from .base import BaseStrategy
 from .think_tool import strip_thinking_tags
 
@@ -32,6 +34,17 @@ class ChainOfThoughtStrategy(BaseStrategy):
     ) -> Any:
         target_model = model_config or "gpt-4o"
 
+        trace_recorder = optional_params.get("trace_recorder")
+        trace_root_id = optional_params.get("trace_root_node_id")
+        strategy_node_id = None
+        if trace_recorder and trace_root_id is not None:
+            strategy_node_id = trace_recorder.add_node(
+                step_type="strategy",
+                parent_id=trace_root_id,
+                model=target_model,
+                content_preview="Chain-of-Thought strategy execution",
+            )
+
         # Step 1: Generate Thoughts
         # specific instructions to force thinking
         think_instructions = (
@@ -51,18 +64,31 @@ class ChainOfThoughtStrategy(BaseStrategy):
                 0, {"role": "system", "content": think_instructions}
             )
 
+        start = time.time()
         thought_response = self.simple_completion(
             model=target_model,
             messages=thought_messages,
             stop=["</thinking>"],  # Stop after thinking
             **litellm_params,
         )
+        thought_duration = time.time() - start
 
         thoughts = thought_response.choices[0].message.content
         if "<thinking>" not in thoughts:
             thoughts = f"<thinking>\n{thoughts}\n</thinking>"
         else:
             thoughts = thoughts + "</thinking>"  # Append the stop token we cut off
+
+        if trace_recorder:
+            trace_recorder.add_node(
+                step_type="llm_call",
+                parent_id=strategy_node_id,
+                model=target_model,
+                role="assistant",
+                content_preview=thoughts[:200],
+                duration_seconds=thought_duration,
+                extra={"stage": "thoughts"},
+            )
 
         # Step 2: Generate Final Answer
         # We feed the thoughts back to the model
@@ -78,9 +104,11 @@ class ChainOfThoughtStrategy(BaseStrategy):
             }
         )
 
+        start = time.time()
         final_response = self.simple_completion(
             model=target_model, messages=final_messages, **litellm_params
         )
+        final_duration = time.time() - start
 
         # Strip any <thinking> tags the model may have echoed back
         if final_response.choices[0].message.content:
@@ -88,9 +116,23 @@ class ChainOfThoughtStrategy(BaseStrategy):
                 final_response.choices[0].message.content
             )
 
+        if trace_recorder:
+            content = final_response.choices[0].message.content or ""
+            trace_recorder.add_node(
+                step_type="llm_call",
+                parent_id=strategy_node_id,
+                model=target_model,
+                role="assistant",
+                content_preview=content[:200],
+                duration_seconds=final_duration,
+                extra={"stage": "final"},
+            )
+
         # Store thoughts in reasoning_content field (like o1/DeepSeek models do)
         # Extract just the thinking content without the tags
-        raw_thoughts = strip_thinking_tags(thoughts.replace("<thinking>", "").replace("</thinking>", ""))
+        raw_thoughts = strip_thinking_tags(
+            thoughts.replace("<thinking>", "").replace("</thinking>", "")
+        )
         final_response.choices[0].message.reasoning_content = raw_thoughts
 
         return final_response

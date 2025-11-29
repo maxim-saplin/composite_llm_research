@@ -1,5 +1,8 @@
 from typing import List, Dict, Any
+import time
+
 import litellm
+
 from .base import BaseStrategy
 
 
@@ -22,6 +25,18 @@ class MoAStrategy(BaseStrategy):
             "proposers", ["cerebras/llama3.1-8b", "cerebras/qwen-3-32b"]
         )
 
+        trace_recorder = optional_params.get("trace_recorder")
+        trace_root_id = optional_params.get("trace_root_node_id")
+
+        strategy_node_id = None
+        if trace_recorder and trace_root_id is not None:
+            strategy_node_id = trace_recorder.add_node(
+                step_type="strategy",
+                parent_id=trace_root_id,
+                model=model_config,
+                content_preview="MoA strategy execution",
+            )
+
         # Step 1: Parallel calls to proposers
         # For simplicity in this synchronous demo, we loop. In production, use asyncio.gather
         proposer_responses = []
@@ -32,13 +47,34 @@ class MoAStrategy(BaseStrategy):
             try:
                 # We reuse the same messages for proposers
                 # Note: We should handle API keys for different providers in real app
+                start = time.time()
                 resp = self.simple_completion(
                     model=p_model, messages=messages, **litellm_params
                 )
+                duration = time.time() - start
                 content = resp.choices[0].message.content
                 proposer_responses.append(f"Model {p_model} suggests:\n{content}")
+
+                if trace_recorder:
+                    trace_recorder.add_node(
+                        step_type="llm_call",
+                        parent_id=strategy_node_id,
+                        model=p_model,
+                        role="assistant",
+                        content_preview=(content or "")[:200],
+                        duration_seconds=duration,
+                    )
             except Exception as e:
-                proposer_responses.append(f"Model {p_model} failed: {str(e)}")
+                error_msg = f"Model {p_model} failed: {str(e)}"
+                proposer_responses.append(error_msg)
+                if trace_recorder:
+                    trace_recorder.add_node(
+                        step_type="llm_call",
+                        parent_id=strategy_node_id,
+                        model=p_model,
+                        role="assistant",
+                        content_preview=error_msg[:200],
+                    )
 
         # Step 2: Aggregation
         # Construct aggregation prompt
@@ -77,8 +113,25 @@ class MoAStrategy(BaseStrategy):
             )
 
         print(f"  [MoA] Aggregating with {model_config}")
+        start = time.time()
         final_response = self.simple_completion(
             model=model_config, messages=aggregator_messages, **litellm_params
         )
+        duration = time.time() - start
+
+        if trace_recorder:
+            content = ""
+            try:
+                content = final_response.choices[0].message.content or ""
+            except Exception:
+                pass
+            trace_recorder.add_node(
+                step_type="aggregation",
+                parent_id=strategy_node_id,
+                model=model_config,
+                role="assistant",
+                content_preview=content[:200],
+                duration_seconds=duration,
+            )
 
         return final_response

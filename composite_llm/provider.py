@@ -1,9 +1,11 @@
 from typing import Dict, Any, List
+from datetime import datetime
+
 import litellm
+
 from .strategies.base import BaseStrategy
-# We will import strategies dynamically or register them here
-# from .strategies.think import ThinkStrategy
-# from .strategies.moa import MoAStrategy
+from .trace import TraceRecorder, get_user_request_preview
+from .observability import log_success
 
 
 class CompositeLLMProvider:
@@ -36,6 +38,10 @@ class CompositeLLMProvider:
             from .strategies.moa import MoAStrategy
 
             new_strategy = MoAStrategy()
+        elif strategy_name == "council":
+            from .strategies.council import CouncilStrategy
+
+            new_strategy = CouncilStrategy()
         else:
             raise ValueError(f"Unknown strategy: {strategy_name}")
 
@@ -70,11 +76,52 @@ class CompositeLLMProvider:
 
         # Extract optional_params if provided (custom arg used in demo.py)
         optional_params = kwargs.pop("optional_params", {})
+        if optional_params is None:
+            optional_params = {}
+
+        # Create a trace recorder for this composite call
+        user_preview = get_user_request_preview(messages)
+        trace_recorder = TraceRecorder(
+            strategy=strategy_name,
+            root_model=model,
+            user_request_preview=user_preview,
+        )
+
+        # Root node: user request
+        root_node_id = trace_recorder.add_node(
+            step_type="user_request",
+            parent_id=None,
+            model=model,
+            role="user",
+            content_preview=user_preview,
+        )
+
+        # Make trace information available to strategies
+        optional_params = dict(optional_params)
+        optional_params["trace_recorder"] = trace_recorder
+        optional_params["trace_root_node_id"] = root_node_id
+
+        start_time = datetime.now()
 
         # execute strategy
-        return strategy.execute(
+        final_response = strategy.execute(
             messages=messages,
             model_config=target_model,
             optional_params=optional_params,
             litellm_params=kwargs,
         )
+
+        # Log a composite-level entry with the full trace graph
+        end_time = datetime.now()
+        try:
+            log_kwargs = {
+                "model": model,  # composite model string
+                "messages": messages,
+                "trace": trace_recorder.to_dict(),
+            }
+            log_success(log_kwargs, final_response, start_time, end_time)
+        except Exception:
+            # Logging should never break the main flow
+            pass
+
+        return final_response
