@@ -53,7 +53,5 @@ resp = composite_completion(
         ],
         "chairman_model": "cerebras/llama-3.3-70b",
     },
-)
-
-print(resp.choices[0].message.content)
+)print(resp.choices[0].message.content)
 ```

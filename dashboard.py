@@ -171,4 +171,3 @@ else:
                     render_node(root_id)
                 else:
                     st.info("No root node found in trace.")
-
