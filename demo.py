@@ -1,9 +1,10 @@
 import os
 import textwrap
+from typing import Any, cast
 from dotenv import load_dotenv
 import litellm
 
-from composite_llm.provider import CompositeLLMProvider
+from composite_llm.litellm_provider import register_composite_provider
 from composite_llm.observability import log_success, log_failure
 
 
@@ -33,37 +34,21 @@ def format_response(content: str, width: int = 80) -> str:
     return "\n".join(formatted_lines)
 
 
-# Load environment variables
 load_dotenv()
+
+# Silence LiteLLM provider list warnings
+litellm.suppress_debug_info = True
+
+# Ensure Cerebras has a usable API key if only LITELLM_API_KEY is set
+if not os.environ.get("CEREBRAS_API_KEY") and os.environ.get("LITELLM_API_KEY"):
+    os.environ["CEREBRAS_API_KEY"] = os.environ["LITELLM_API_KEY"]
 
 # 1. Register Observability Callbacks
 litellm.success_callback = [log_success]
 litellm.failure_callback = [log_failure]
 
 # 2. Register Custom Provider
-composite_provider = CompositeLLMProvider()
-
-
-def composite_completion(model, messages, **kwargs):
-    """
-    Wrapper to route calls to our Composite Provider if the model name starts with 'composite/'
-    """
-    if model.startswith("composite/"):
-        return composite_provider.completion(
-            model=model,
-            messages=messages,
-            model_response=None,
-            **kwargs,
-        )
-    else:
-        # Pass LITELLM_API_KEY as api_key if not set otherwise
-        api_key = kwargs.get("api_key")
-        if not api_key:
-            api_key = os.environ.get("LITELLM_API_KEY")
-            if api_key:
-                kwargs["api_key"] = api_key
-
-        return litellm.completion(model=model, messages=messages, **kwargs)
+register_composite_provider()
 
 
 # Mocking for Demonstration Purposes (if no API key)
@@ -129,29 +114,6 @@ def run_demo():
             "model": MODELS["llama-8b"],
             "type": "baseline",
         },
-        # Chain of Thought Strategy (two-step prompting with explicit reasoning)
-        # Note: "think" is kept as alias for backwards compatibility
-        {
-            "name": "CoT + Llama-70b",
-            "model": f"composite/cot/{MODELS['llama-70b']}",
-            "type": "composite",
-            "params": {},
-        },
-        {
-            "name": "CoT + Llama-8b",
-            "model": f"composite/cot/{MODELS['llama-8b']}",
-            "type": "composite",
-            "params": {},
-        },
-        # Think Tool Strategy (Anthropic's pattern for agentic workflows)
-        # Best for: tool output analysis, policy compliance, sequential decisions
-        # See: https://www.anthropic.com/engineering/claude-think-tool
-        {
-            "name": "ThinkTool + Llama-70b",
-            "model": f"composite/think_tool/{MODELS['llama-70b']}",
-            "type": "composite",
-            "params": {"include_think_prompt": True},
-        },
         # MoA Strategy
         {
             "name": "MoA (Agg: 70b, Prop: [8b, Qwen])",
@@ -184,12 +146,6 @@ def run_demo():
             if config_type == "baseline":
                 icon = "🔹"
                 color = Colors.BLUE
-            elif "CoT" in config["name"]:
-                icon = "🧠"
-                color = Colors.CYAN
-            elif "ThinkTool" in config["name"]:
-                icon = "💭"
-                color = Colors.YELLOW
             elif "MoA" in config["name"]:
                 icon = "🤝"
                 color = Colors.GREEN
@@ -205,14 +161,31 @@ def run_demo():
                 kwargs = {}
                 if "params" in config:
                     kwargs["optional_params"] = config["params"]
+                if "cerebras/" in config["model"]:
+                    api_key = os.environ.get("CEREBRAS_API_KEY") or os.environ.get(
+                        "LITELLM_API_KEY"
+                    )
+                    if api_key:
+                        kwargs["api_key"] = api_key
 
-                resp = composite_completion(
-                    model=config["model"],
-                    messages=[{"role": "user", "content": task["prompt"]}],
-                    **kwargs,
+                resp = cast(
+                    Any,
+                    litellm.completion(
+                        model=config["model"],
+                        messages=[{"role": "user", "content": task["prompt"]}],
+                        **kwargs,
+                    ),
                 )
 
-                content = resp.choices[0].message.content
+                response_message = None
+                try:
+                    response_message = resp.choices[0].message
+                except Exception:
+                    pass
+
+                content = ""
+                if response_message is not None:
+                    content = str(getattr(response_message, "content", "") or "")
 
                 # Format and display the full response
                 formatted = format_response(content, width=70)

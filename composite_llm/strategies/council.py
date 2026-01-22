@@ -27,10 +27,12 @@ The client sees a single chat completion response, but we attach a
 of the council deliberations (answers + reviews).
 """
 
-from typing import List, Dict, Any
+from typing import List, Dict, Any, cast, Callable, Sequence, Awaitable
+import asyncio
 import time
 
 from .base import BaseStrategy
+from ..trace import extract_usage_metrics
 
 
 DEFAULT_COUNCIL_MODELS = [
@@ -40,6 +42,13 @@ DEFAULT_COUNCIL_MODELS = [
     "anthropic/claude-sonnet-4.5",
     "x-ai/grok-4",
 ]
+
+
+def _compact_text(text: str, max_len: int = 160) -> str:
+    normalized = " ".join(text.split())
+    if len(normalized) <= max_len:
+        return normalized
+    return f"{normalized[: max_len - 3]}..."
 
 
 class CouncilStrategy(BaseStrategy):
@@ -64,18 +73,38 @@ class CouncilStrategy(BaseStrategy):
             If True (default), include Stage 1 & 2 summaries in `reasoning_content`.
     """
 
+    def _run_async_tasks(
+        self,
+        build_coroutines: Callable[[], Sequence[Awaitable[Dict[str, Any]]]],
+        fallback: Callable[[], List[Dict[str, Any]]],
+    ) -> List[Dict[str, Any]]:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            return fallback()
+
+        async def _runner() -> List[Dict[str, Any]]:
+            return await asyncio.gather(*build_coroutines())
+
+        return asyncio.run(_runner())
+
     def execute(
         self,
         messages: List[Dict[str, str]],
         model_config: str,
         optional_params: Dict[str, Any],
         litellm_params: Dict[str, Any],
-        ) -> Any:
+    ) -> Any:
         # Configuration
         council_models = optional_params.get("council_models") or DEFAULT_COUNCIL_MODELS
         review_models = optional_params.get("review_models") or council_models
-        chairman_model = optional_params.get("chairman_model") or model_config or (
-            council_models[0] if council_models else "openai/gpt-4.1-mini"
+        chairman_model = (
+            optional_params.get("chairman_model")
+            or model_config
+            or (council_models[0] if council_models else "openai/gpt-4.1-mini")
         )
         max_council_size = optional_params.get("max_council_size")
         include_stage_summaries = optional_params.get(
@@ -88,6 +117,9 @@ class CouncilStrategy(BaseStrategy):
 
         trace_recorder = optional_params.get("trace_recorder")
         trace_root_id = optional_params.get("trace_root_node_id")
+        resume_state = optional_params.get("resume_state")
+        final_stage = optional_params.get("final_stage")
+        tool_trace_context = optional_params.get("tool_trace_context")
         strategy_node_id = None
         if trace_recorder and trace_root_id is not None:
             strategy_node_id = trace_recorder.add_node(
@@ -97,22 +129,111 @@ class CouncilStrategy(BaseStrategy):
                 content_preview="Council strategy execution",
             )
 
+        # Resume path: only run chairman stage with captured messages
+        if resume_state:
+            final_model = resume_state.get("model", chairman_model)
+            final_messages = resume_state.get("messages") or messages
+            reasoning_content = resume_state.get("reasoning_content")
+            tool_trace = resume_state.get("tool_trace") or []
+            if isinstance(final_stage, dict):
+                final_stage.update(
+                    {
+                        "model": final_model,
+                        "messages": [m.copy() for m in final_messages],
+                        "reasoning_content": reasoning_content,
+                        "stage": "stage3",
+                    }
+                )
+
+            start = time.time()
+            final_response = self.simple_completion(
+                model=final_model, messages=final_messages, **litellm_params
+            )
+            duration = time.time() - start
+            final_usage = extract_usage_metrics(final_response)
+
+            if trace_recorder:
+                content = ""
+                final_choices = cast(Any, getattr(final_response, "choices", None))
+                if final_choices:
+                    content = final_choices[0].message.content or ""  # type: ignore[attr-defined]
+                trace_recorder.add_node(
+                    step_type="chairman",
+                    parent_id=strategy_node_id,
+                    model=final_model,
+                    role="assistant",
+                    content_preview=content[:200],
+                    duration_seconds=duration,
+                    prompt_tokens=final_usage["prompt_tokens"],
+                    completion_tokens=final_usage["completion_tokens"],
+                    total_tokens=final_usage["total_tokens"],
+                    cost=final_usage["cost"],
+                    extra={"stage": "stage3", "resume": True},
+                )
+
+            choices = cast(Any, getattr(final_response, "choices", None))
+            if choices and hasattr(choices[0], "message") and reasoning_content:
+                msg = choices[0].message  # type: ignore[attr-defined]
+                if tool_trace:
+                    reasoning_content = "\n".join(
+                        [reasoning_content, "", "Tool Trace:"] + tool_trace
+                    )
+                setattr(msg, "reasoning_content", reasoning_content)
+
+            return final_response
+
         # --- Stage 1: First Opinions ---
         council_answers: List[Dict[str, str]] = []
 
-        for idx, model_name in enumerate(council_models):
-            alias = f"Assistant {idx + 1}"
+        def _call_council_sync(model_name: str, alias: str) -> Dict[str, Any]:
             try:
                 start = time.time()
                 response = self.simple_completion(
                     model=model_name, messages=messages, **litellm_params
                 )
                 duration = time.time() - start
-                content = response.choices[0].message.content
+                response_choices = cast(Any, getattr(response, "choices", None))  # type: ignore[attr-defined]
+                content = ""
+                if response_choices:
+                    content = response_choices[0].message.content or ""  # type: ignore[attr-defined]
+                usage = extract_usage_metrics(response)
+                return {
+                    "alias": alias,
+                    "model": model_name,
+                    "content": content,
+                    "duration": duration,
+                    "usage": usage,
+                    "error": None,
+                }
             except Exception as e:
-                duration = None
-                content = f"[ERROR from model '{model_name}': {e}]"
+                return {
+                    "alias": alias,
+                    "model": model_name,
+                    "content": f"[ERROR from model '{model_name}': {e}]",
+                    "duration": None,
+                    "usage": None,
+                    "error": str(e),
+                }
 
+        async def _call_council_async(model_name: str, alias: str) -> Dict[str, Any]:
+            return await asyncio.to_thread(_call_council_sync, model_name, alias)
+
+        council_results = self._run_async_tasks(
+            lambda: [
+                _call_council_async(model_name, f"Assistant {idx + 1}")
+                for idx, model_name in enumerate(council_models)
+            ],
+            fallback=lambda: [
+                _call_council_sync(model_name, f"Assistant {idx + 1}")
+                for idx, model_name in enumerate(council_models)
+            ],
+        )
+
+        for result in council_results:
+            alias = result["alias"]
+            model_name = result["model"]
+            content = result["content"]
+            usage = result["usage"]
             council_answers.append(
                 {
                     "alias": alias,
@@ -128,7 +249,11 @@ class CouncilStrategy(BaseStrategy):
                     model=model_name,
                     role="assistant",
                     content_preview=(content or "")[:200],
-                    duration_seconds=duration,
+                    duration_seconds=result["duration"],
+                    prompt_tokens=usage["prompt_tokens"] if usage else None,
+                    completion_tokens=usage["completion_tokens"] if usage else None,
+                    total_tokens=usage["total_tokens"] if usage else None,
+                    cost=usage["cost"] if usage else None,
                     extra={"stage": "stage1", "alias": alias},
                 )
 
@@ -146,11 +271,9 @@ class CouncilStrategy(BaseStrategy):
         # Determine how many reviewers to use (mirror number of answers)
         num_reviewers = min(len(council_answers), len(review_models))
 
-        for i in range(num_reviewers):
-            reviewer_model = review_models[i]
-            reviewer_alias = f"Reviewer {i + 1}"
-
-            # Construct review prompt: original conversation + council answers
+        def _call_reviewer_sync(
+            reviewer_model: str, reviewer_alias: str
+        ) -> Dict[str, Any]:
             review_messages = [m.copy() for m in messages]
             review_messages.append(
                 {
@@ -179,10 +302,52 @@ class CouncilStrategy(BaseStrategy):
                     **litellm_params,
                 )
                 duration = time.time() - start
-                review_content = review_resp.choices[0].message.content
+                review_choices = cast(Any, getattr(review_resp, "choices", None))  # type: ignore[attr-defined]
+                review_content = ""
+                if review_choices:
+                    review_content = review_choices[0].message.content or ""  # type: ignore[attr-defined]
+                review_usage = extract_usage_metrics(review_resp)
+                return {
+                    "reviewer_alias": reviewer_alias,
+                    "model": reviewer_model,
+                    "content": review_content,
+                    "duration": duration,
+                    "usage": review_usage,
+                    "error": None,
+                }
             except Exception as e:
-                duration = None
-                review_content = f"[ERROR from reviewer model '{reviewer_model}': {e}]"
+                return {
+                    "reviewer_alias": reviewer_alias,
+                    "model": reviewer_model,
+                    "content": f"[ERROR from reviewer model '{reviewer_model}': {e}]",
+                    "duration": None,
+                    "usage": None,
+                    "error": str(e),
+                }
+
+        async def _call_reviewer_async(
+            reviewer_model: str, reviewer_alias: str
+        ) -> Dict[str, Any]:
+            return await asyncio.to_thread(
+                _call_reviewer_sync, reviewer_model, reviewer_alias
+            )
+
+        review_results = self._run_async_tasks(
+            lambda: [
+                _call_reviewer_async(review_models[i], f"Reviewer {i + 1}")
+                for i in range(num_reviewers)
+            ],
+            fallback=lambda: [
+                _call_reviewer_sync(review_models[i], f"Reviewer {i + 1}")
+                for i in range(num_reviewers)
+            ],
+        )
+
+        for result in review_results:
+            reviewer_alias = result["reviewer_alias"]
+            reviewer_model = result["model"]
+            review_content = result["content"]
+            review_usage = result["usage"]
 
             reviews.append(
                 {
@@ -199,25 +364,53 @@ class CouncilStrategy(BaseStrategy):
                     model=reviewer_model,
                     role="assistant",
                     content_preview=(review_content or "")[:200],
-                    duration_seconds=duration,
+                    duration_seconds=result["duration"],
+                    prompt_tokens=review_usage["prompt_tokens"]
+                    if review_usage
+                    else None,
+                    completion_tokens=review_usage["completion_tokens"]
+                    if review_usage
+                    else None,
+                    total_tokens=review_usage["total_tokens"] if review_usage else None,
+                    cost=review_usage["cost"] if review_usage else None,
                     extra={"stage": "stage2", "reviewer_alias": reviewer_alias},
                 )
 
         # --- Stage 3: Chairman Synthesis ---
         # Prepare summaries for the chairman
-        stage1_summary_lines: List[str] = ["=== Stage 1: Council Answers ==="]
+        stage1_summary_full_lines: List[str] = ["=== Stage 1: Council Answers ==="]
         for ans in council_answers:
-            stage1_summary_lines.append(f"{ans['alias']}:")
-            stage1_summary_lines.append(ans["content"])
-            stage1_summary_lines.append("")
-        stage1_summary = "\n".join(stage1_summary_lines).strip()
+            stage1_summary_full_lines.append(f"{ans['alias']}:")
+            stage1_summary_full_lines.append(ans["content"])
+            stage1_summary_full_lines.append("")
+        stage1_summary_full = "\n".join(stage1_summary_full_lines).strip()
 
-        stage2_summary_lines: List[str] = ["=== Stage 2: Cross-Reviews & Rankings ==="]
+        stage2_summary_full_lines: List[str] = [
+            "=== Stage 2: Cross-Reviews & Rankings ==="
+        ]
         for rev in reviews:
-            stage2_summary_lines.append(f"{rev['reviewer_alias']} (model: {rev['model']}):")
-            stage2_summary_lines.append(rev["content"])
-            stage2_summary_lines.append("")
-        stage2_summary = "\n".join(stage2_summary_lines).strip()
+            stage2_summary_full_lines.append(
+                f"{rev['reviewer_alias']} (model: {rev['model']}):"
+            )
+            stage2_summary_full_lines.append(rev["content"])
+            stage2_summary_full_lines.append("")
+        stage2_summary_full = "\n".join(stage2_summary_full_lines).strip()
+
+        stage1_summary_compact_lines: List[str] = ["Stage 1 summary:"]
+        for ans in council_answers:
+            compact = _compact_text(ans["content"])
+            stage1_summary_compact_lines.append(
+                f"- {ans['alias']} ({ans['model']}): {compact}"
+            )
+        stage1_summary_compact = "\n".join(stage1_summary_compact_lines).strip()
+
+        stage2_summary_compact_lines: List[str] = ["Stage 2 summary:"]
+        for rev in reviews:
+            compact = _compact_text(rev["content"])
+            stage2_summary_compact_lines.append(
+                f"- {rev['reviewer_alias']} ({rev['model']}): {compact}"
+            )
+        stage2_summary_compact = "\n".join(stage2_summary_compact_lines).strip()
 
         chairman_messages = [m.copy() for m in messages]
 
@@ -239,14 +432,53 @@ class CouncilStrategy(BaseStrategy):
                 "role": "user",
                 "content": (
                     f"{chairman_instructions}\n\n"
-                    f"{stage1_summary}\n\n"
-                    f"{stage2_summary}\n\n"
+                    f"{stage1_summary_full}\n\n"
+                    f"{stage2_summary_full}\n\n"
                     "Now, as the chairman, provide your final answer to the user. "
                     "Do not mention the council or the internal process explicitly "
                     "unless the user has asked you to."
                 ),
             }
         )
+
+        reasoning_parts = [
+            "LLM Council Trace:",
+            f"Stage 1 models: {', '.join(council_models)}"
+            if council_models
+            else "Stage 1 models: none",
+            f"Stage 2 reviewers: {', '.join(review_models[:num_reviewers])}"
+            if num_reviewers
+            else "Stage 2 reviewers: none",
+            f"Stage 3 chairman: {chairman_model}",
+            "",
+            stage1_summary_compact
+            if include_stage_summaries
+            else "Stage 1 summary omitted.",
+            "",
+            stage2_summary_compact
+            if include_stage_summaries
+            else "Stage 2 summary omitted.",
+            "",
+            "Stage 3 summary:",
+            f"- Chairman synthesized final response using {chairman_model}.",
+        ]
+        reasoning_content = "\n".join(reasoning_parts).strip()
+        tool_trace: List[str] = []
+        if tool_trace_context:
+            tool_trace = list(tool_trace_context)
+            reasoning_content = "\n".join(
+                [reasoning_content, "", "Tool Trace:"] + tool_trace
+            )
+        if isinstance(final_stage, dict):
+            final_stage.update(
+                {
+                    "model": chairman_model,
+                    "messages": [m.copy() for m in chairman_messages],
+                    "reasoning_content": reasoning_content,
+                    "tool_trace": tool_trace,
+                    "stage": "stage3",
+                }
+            )
 
         start = time.time()
         final_response = self.simple_completion(
@@ -255,13 +487,13 @@ class CouncilStrategy(BaseStrategy):
             **litellm_params,
         )
         duration = time.time() - start
+        final_usage = extract_usage_metrics(final_response)
 
         if trace_recorder:
             content = ""
-            try:
-                content = final_response.choices[0].message.content or ""
-            except Exception:
-                pass
+            final_choices = cast(Any, getattr(final_response, "choices", None))  # type: ignore[attr-defined]
+            if final_choices:
+                content = final_choices[0].message.content or ""  # type: ignore[attr-defined]
             trace_recorder.add_node(
                 step_type="chairman",
                 parent_id=strategy_node_id,
@@ -269,31 +501,18 @@ class CouncilStrategy(BaseStrategy):
                 role="assistant",
                 content_preview=content[:200],
                 duration_seconds=duration,
+                prompt_tokens=final_usage["prompt_tokens"],
+                completion_tokens=final_usage["completion_tokens"],
+                total_tokens=final_usage["total_tokens"],
+                cost=final_usage["cost"],
                 extra={"stage": "stage3"},
             )
 
         # Attach a compact trace of the council process to reasoning_content
-        if (
-            hasattr(final_response, "choices")
-            and final_response.choices
-            and hasattr(final_response.choices[0], "message")
-        ):
-            msg = final_response.choices[0].message
-            if include_stage_summaries:
-                trace_parts = [
-                    "LLM Council Trace:",
-                    "",
-                    stage1_summary,
-                    "",
-                    stage2_summary,
-                ]
-                trace_text = "\n".join(trace_parts).strip()
-            else:
-                trace_text = "LLM Council executed (stage summaries omitted)."
-
+        choices = cast(Any, getattr(final_response, "choices", None))
+        if choices and hasattr(choices[0], "message"):
+            msg = choices[0].message  # type: ignore[attr-defined]
             # Attach as a non-standard field; many SDKs allow arbitrary attributes
-            setattr(msg, "reasoning_content", trace_text)
+            setattr(msg, "reasoning_content", reasoning_content)
 
         return final_response
-
-

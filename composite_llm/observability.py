@@ -21,7 +21,8 @@ def log_success(kwargs, response_obj, start_time, end_time):
         else:
             # Assume timestamps
             duration = end_time - start_time
-            timestamp_str = datetime.fromtimestamp(end_time).isoformat()
+            timestamp_obj = datetime.fromtimestamp(float(end_time))  # type: ignore[arg-type]
+            timestamp_str = timestamp_obj.isoformat()
 
         # Extract model and input details
         model = kwargs.get("model", "unknown")
@@ -38,6 +39,23 @@ def log_success(kwargs, response_obj, start_time, end_time):
             completion_tokens = 0
             total_tokens = 0
 
+        cost = (
+            getattr(response_obj, "cost", None)
+            or getattr(response_obj, "response_cost", None)
+            or getattr(response_obj, "total_cost", None)
+        )
+        if cost is None and isinstance(usage, dict):
+            cost = usage.get("cost") or usage.get("response_cost") or usage.get("total_cost")
+        if cost is None:
+            hidden_params = getattr(response_obj, "_hidden_params", None)
+            if isinstance(hidden_params, dict):
+                cost = hidden_params.get("response_cost") or hidden_params.get("total_cost")
+        if cost is not None:
+            try:
+                cost = float(cost)
+            except (TypeError, ValueError):
+                cost = None
+
         # Create log entry
         log_entry = {
             "timestamp": timestamp_str,
@@ -47,6 +65,7 @@ def log_success(kwargs, response_obj, start_time, end_time):
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
             "total_tokens": total_tokens,
+            "cost": cost,
             # We avoid logging full content for privacy/size in this demo,
             # but in production you might want it.
             # "input_snippet": str(messages)[:100],
@@ -76,7 +95,8 @@ def log_failure(kwargs, exception, start_time, end_time):
             timestamp_str = end_time.isoformat()
         else:
             duration = end_time - start_time
-            timestamp_str = datetime.fromtimestamp(end_time).isoformat()
+            timestamp_obj = datetime.fromtimestamp(float(end_time))  # type: ignore[arg-type]
+            timestamp_str = timestamp_obj.isoformat()
 
         model = kwargs.get("model", "unknown")
 

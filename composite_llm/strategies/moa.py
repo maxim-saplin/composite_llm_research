@@ -1,12 +1,32 @@
-from typing import List, Dict, Any
+from typing import List, Dict, Any, cast, Callable, Sequence, Awaitable, Optional
+import asyncio
 import time
 
 import litellm
 
 from .base import BaseStrategy
+from ..trace import extract_usage_metrics
 
 
 class MoAStrategy(BaseStrategy):
+    def _run_async_tasks(
+        self,
+        build_coroutines: Callable[[], Sequence[Awaitable[Dict[str, Any]]]],
+        fallback: Callable[[], List[Dict[str, Any]]],
+    ) -> List[Dict[str, Any]]:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            return fallback()
+
+        async def _runner() -> List[Dict[str, Any]]:
+            return await asyncio.gather(*build_coroutines())
+
+        return asyncio.run(_runner())
+
     def execute(
         self,
         messages: List[Dict[str, str]],
@@ -27,6 +47,9 @@ class MoAStrategy(BaseStrategy):
 
         trace_recorder = optional_params.get("trace_recorder")
         trace_root_id = optional_params.get("trace_root_node_id")
+        resume_state = optional_params.get("resume_state")
+        final_stage = optional_params.get("final_stage")
+        tool_trace_context = optional_params.get("tool_trace_context")
 
         strategy_node_id = None
         if trace_recorder and trace_root_id is not None:
@@ -37,44 +60,133 @@ class MoAStrategy(BaseStrategy):
                 content_preview="MoA strategy execution",
             )
 
+        if resume_state:
+            final_model = resume_state.get("model", model_config)
+            final_messages = resume_state.get("messages") or messages
+            reasoning_content = resume_state.get("reasoning_content")
+            tool_trace = resume_state.get("tool_trace") or []
+            if isinstance(final_stage, dict):
+                final_stage.update(
+                    {
+                        "model": final_model,
+                        "messages": [m.copy() for m in final_messages],
+                        "reasoning_content": reasoning_content,
+                        "stage": "aggregation",
+                    }
+                )
+
+            start = time.time()
+            final_response = self.simple_completion(
+                model=final_model, messages=final_messages, **litellm_params
+            )
+            duration = time.time() - start
+            usage = extract_usage_metrics(final_response)
+
+            if trace_recorder:
+                content = ""
+                try:
+                    content = final_response.choices[0].message.content or ""  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+                trace_recorder.add_node(
+                    step_type="aggregation",
+                    parent_id=strategy_node_id,
+                    model=final_model,
+                    role="assistant",
+                    content_preview=content[:200],
+                    duration_seconds=duration,
+                    prompt_tokens=usage["prompt_tokens"],
+                    completion_tokens=usage["completion_tokens"],
+                    total_tokens=usage["total_tokens"],
+                    cost=usage["cost"],
+                    extra={"resume": True},
+                )
+
+            final_choices = cast(Any, getattr(final_response, "choices", None))
+            if final_choices and hasattr(final_choices[0], "message"):
+                msg = final_choices[0].message  # type: ignore[attr-defined]
+                if reasoning_content:
+                    if tool_trace:
+                        reasoning_content = "\n".join(
+                            [reasoning_content, "", "Tool Trace:"] + tool_trace
+                        )
+                    setattr(msg, "reasoning_content", reasoning_content)
+
+            return final_response
+
         # Step 1: Parallel calls to proposers
-        # For simplicity in this synchronous demo, we loop. In production, use asyncio.gather
-        proposer_responses = []
+        proposer_responses: List[str] = []
 
         print(f"  [MoA] Querying proposers: {proposers}")
 
-        for p_model in proposers:
+        def _call_proposer_sync(p_model: str) -> Dict[str, Any]:
             try:
-                # We reuse the same messages for proposers
-                # Note: We should handle API keys for different providers in real app
                 start = time.time()
                 resp = self.simple_completion(
                     model=p_model, messages=messages, **litellm_params
                 )
                 duration = time.time() - start
-                content = resp.choices[0].message.content
-                proposer_responses.append(f"Model {p_model} suggests:\n{content}")
-
-                if trace_recorder:
-                    trace_recorder.add_node(
-                        step_type="llm_call",
-                        parent_id=strategy_node_id,
-                        model=p_model,
-                        role="assistant",
-                        content_preview=(content or "")[:200],
-                        duration_seconds=duration,
-                    )
+                resp_choices = cast(Any, getattr(resp, "choices", None))
+                content = ""
+                if resp_choices:
+                    content = resp_choices[0].message.content or ""  # type: ignore[attr-defined]
+                usage = extract_usage_metrics(resp)
+                return {
+                    "model": p_model,
+                    "content": content,
+                    "duration": duration,
+                    "usage": usage,
+                    "error": None,
+                }
             except Exception as e:
-                error_msg = f"Model {p_model} failed: {str(e)}"
+                return {
+                    "model": p_model,
+                    "content": "",
+                    "duration": None,
+                    "usage": None,
+                    "error": str(e),
+                }
+
+        async def _call_proposer_async(p_model: str) -> Dict[str, Any]:
+            return await asyncio.to_thread(_call_proposer_sync, p_model)
+
+        proposer_results = self._run_async_tasks(
+            lambda: [_call_proposer_async(p_model) for p_model in proposers],
+            fallback=lambda: [_call_proposer_sync(p_model) for p_model in proposers],
+        )
+
+        for result in proposer_results:
+            model_name = result["model"]
+            if result["error"]:
+                error_msg = f"Model {model_name} failed: {result['error']}"
                 proposer_responses.append(error_msg)
                 if trace_recorder:
                     trace_recorder.add_node(
                         step_type="llm_call",
                         parent_id=strategy_node_id,
-                        model=p_model,
+                        model=model_name,
                         role="assistant",
                         content_preview=error_msg[:200],
                     )
+                continue
+
+            content = result["content"]
+            usage = result["usage"]
+            proposer_responses.append(f"Model {model_name} suggests:\n{content}")
+
+            if trace_recorder and usage:
+                trace_recorder.add_node(
+                    step_type="llm_call",
+                    parent_id=strategy_node_id,
+                    model=model_name,
+                    role="assistant",
+                    content_preview=(content or "")[:200],
+                    duration_seconds=result["duration"],
+                    prompt_tokens=usage["prompt_tokens"],
+                    completion_tokens=usage["completion_tokens"],
+                    total_tokens=usage["total_tokens"],
+                    cost=usage["cost"],
+                )
 
         # Step 2: Aggregation
         # Construct aggregation prompt
@@ -113,16 +225,41 @@ class MoAStrategy(BaseStrategy):
             )
 
         print(f"  [MoA] Aggregating with {model_config}")
+        reasoning_content = "\n".join(
+            [
+                "MoA Trace:",
+                f"Proposers: {', '.join(proposers)}" if proposers else "Proposers: none",
+                f"Aggregator: {model_config}",
+            ]
+        )
+        tool_trace: List[str] = []
+        if tool_trace_context:
+            tool_trace = list(tool_trace_context)
+            reasoning_content = "\n".join(
+                [reasoning_content, "", "Tool Trace:"] + tool_trace
+            )
+        if isinstance(final_stage, dict):
+            final_stage.update(
+                {
+                    "model": model_config,
+                    "messages": [m.copy() for m in aggregator_messages],
+                    "reasoning_content": reasoning_content,
+                    "tool_trace": tool_trace,
+                    "stage": "aggregation",
+                }
+            )
+
         start = time.time()
         final_response = self.simple_completion(
             model=model_config, messages=aggregator_messages, **litellm_params
         )
         duration = time.time() - start
+        usage = extract_usage_metrics(final_response)
 
         if trace_recorder:
             content = ""
             try:
-                content = final_response.choices[0].message.content or ""
+                content = final_response.choices[0].message.content or ""  # type: ignore[attr-defined]
             except Exception:
                 pass
             trace_recorder.add_node(
@@ -132,6 +269,15 @@ class MoAStrategy(BaseStrategy):
                 role="assistant",
                 content_preview=content[:200],
                 duration_seconds=duration,
+                prompt_tokens=usage["prompt_tokens"],
+                completion_tokens=usage["completion_tokens"],
+                total_tokens=usage["total_tokens"],
+                cost=usage["cost"],
             )
+
+        final_choices = cast(Any, getattr(final_response, "choices", None))
+        if final_choices and hasattr(final_choices[0], "message"):
+            msg = final_choices[0].message  # type: ignore[attr-defined]
+            setattr(msg, "reasoning_content", reasoning_content)
 
         return final_response

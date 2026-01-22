@@ -71,7 +71,7 @@ else:
         traced_df = df[df["trace"].notna()]
 
         if traced_df.empty:
-            st.info("No trace data found yet. Run composite models (e.g., MoA, Council, CoT, ThinkTool).")
+            st.info("No trace data found yet. Run composite models (e.g., MoA, Council).")
         else:
             # Ensure trace column is parsed JSON if serialized as string
             def _parse_trace(val):

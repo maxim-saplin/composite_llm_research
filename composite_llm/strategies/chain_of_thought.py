@@ -9,11 +9,12 @@ This is NOT the same as Anthropic's "think" tool - see think_tool.py for that.
 This is closer to "extended thinking" or chain-of-thought prompting.
 """
 
-from typing import List, Dict, Any
+from typing import List, Dict, Any, cast
 import time
 
 from .base import BaseStrategy
 from .think_tool import strip_thinking_tags
+from ..trace import extract_usage_metrics
 
 
 class ChainOfThoughtStrategy(BaseStrategy):
@@ -73,11 +74,15 @@ class ChainOfThoughtStrategy(BaseStrategy):
         )
         thought_duration = time.time() - start
 
-        thoughts = thought_response.choices[0].message.content
-        if "<thinking>" not in thoughts:
+        thought_choices = cast(Any, getattr(thought_response, "choices", None))
+        thoughts = ""
+        if thought_choices:
+            thoughts = thought_choices[0].message.content or ""  # type: ignore[attr-defined]
+        thought_usage = extract_usage_metrics(thought_response)
+        if "<thinking>" not in (thoughts or ""):
             thoughts = f"<thinking>\n{thoughts}\n</thinking>"
         else:
-            thoughts = thoughts + "</thinking>"  # Append the stop token we cut off
+            thoughts = f"{thoughts}</thinking>"  # Append the stop token we cut off
 
         if trace_recorder:
             trace_recorder.add_node(
@@ -87,6 +92,10 @@ class ChainOfThoughtStrategy(BaseStrategy):
                 role="assistant",
                 content_preview=thoughts[:200],
                 duration_seconds=thought_duration,
+                prompt_tokens=thought_usage["prompt_tokens"],
+                completion_tokens=thought_usage["completion_tokens"],
+                total_tokens=thought_usage["total_tokens"],
+                cost=thought_usage["cost"],
                 extra={"stage": "thoughts"},
             )
 
@@ -109,15 +118,19 @@ class ChainOfThoughtStrategy(BaseStrategy):
             model=target_model, messages=final_messages, **litellm_params
         )
         final_duration = time.time() - start
+        final_usage = extract_usage_metrics(final_response)
 
         # Strip any <thinking> tags the model may have echoed back
-        if final_response.choices[0].message.content:
-            final_response.choices[0].message.content = strip_thinking_tags(
-                final_response.choices[0].message.content
+        final_choices = cast(Any, getattr(final_response, "choices", None))
+        if final_choices and final_choices[0].message.content:  # type: ignore[attr-defined]
+            final_choices[0].message.content = strip_thinking_tags(
+                final_choices[0].message.content
             )
 
         if trace_recorder:
-            content = final_response.choices[0].message.content or ""
+            content = ""
+            if final_choices:
+                content = final_choices[0].message.content or ""  # type: ignore[attr-defined]
             trace_recorder.add_node(
                 step_type="llm_call",
                 parent_id=strategy_node_id,
@@ -125,6 +138,10 @@ class ChainOfThoughtStrategy(BaseStrategy):
                 role="assistant",
                 content_preview=content[:200],
                 duration_seconds=final_duration,
+                prompt_tokens=final_usage["prompt_tokens"],
+                completion_tokens=final_usage["completion_tokens"],
+                total_tokens=final_usage["total_tokens"],
+                cost=final_usage["cost"],
                 extra={"stage": "final"},
             )
 
@@ -133,7 +150,13 @@ class ChainOfThoughtStrategy(BaseStrategy):
         raw_thoughts = strip_thinking_tags(
             thoughts.replace("<thinking>", "").replace("</thinking>", "")
         )
-        final_response.choices[0].message.reasoning_content = raw_thoughts
+        if final_choices:
+            reasoning_parts = [
+                "CoT Trace:",
+                f"Model: {target_model}",
+            ]
+            if raw_thoughts:
+                reasoning_parts.extend(["", "Thought summary:", raw_thoughts])
+            final_choices[0].message.reasoning_content = "\n".join(reasoning_parts)  # type: ignore[attr-defined]
 
         return final_response
-

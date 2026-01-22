@@ -25,9 +25,10 @@ NOT suited for:
 import json
 import re
 import time
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, cast
 
 from .base import BaseStrategy
+from ..trace import extract_usage_metrics
 
 
 def strip_thinking_tags(content: Optional[str]) -> str:
@@ -258,9 +259,14 @@ class ThinkToolStrategy(BaseStrategy):
                 **{k: v for k, v in litellm_params.items() if k not in ["tools"]}
             )
             duration = time.time() - start
+            usage = extract_usage_metrics(response)
             last_response = response
             
-            message = response.choices[0].message
+            response_choices = cast(Any, getattr(response, "choices", None))  # type: ignore[attr-defined]
+            if not response_choices:
+                last_response = response
+                break
+            message = response_choices[0].message  # type: ignore[attr-defined]
 
             if trace_recorder:
                 trace_recorder.add_node(
@@ -270,6 +276,10 @@ class ThinkToolStrategy(BaseStrategy):
                     role="assistant",
                     content_preview=(message.content or "")[:200],
                     duration_seconds=duration,
+                    prompt_tokens=usage["prompt_tokens"],
+                    completion_tokens=usage["completion_tokens"],
+                    total_tokens=usage["total_tokens"],
+                    cost=usage["cost"],
                     extra={"iteration": iteration},
                 )
             
@@ -279,12 +289,21 @@ class ThinkToolStrategy(BaseStrategy):
                 if message.content:
                     message.content = strip_thinking_tags(message.content)
                 # Store collected thoughts in reasoning_content field
+                reasoning_parts = [
+                    "ThinkTool Trace:",
+                    f"Model: {target_model}",
+                    f"Iterations: {iteration + 1}",
+                    f"Tools: {', '.join([t['function']['name'] for t in all_tools])}",
+                ]
                 if collected_thoughts:
-                    message.reasoning_content = "\n\n".join(collected_thoughts)
+                    reasoning_parts.append("")
+                    reasoning_parts.append("Thoughts:")
+                    reasoning_parts.extend(collected_thoughts)
+                message.reasoning_content = "\n".join(reasoning_parts)
                 return response
             
             # Add assistant message with tool calls to history
-            working_messages.append({
+            assistant_message = cast(Dict[str, Any], {
                 "role": "assistant",
                 "content": message.content or "",
                 "tool_calls": [
@@ -293,12 +312,13 @@ class ThinkToolStrategy(BaseStrategy):
                         "type": "function",
                         "function": {
                             "name": tc.function.name,
-                            "arguments": tc.function.arguments
-                        }
+                            "arguments": tc.function.arguments,
+                        },
                     }
                     for tc in message.tool_calls
-                ]
+                ],
             })
+            working_messages.append(assistant_message)  # type: ignore[arg-type]
             
             # Process each tool call
             for tool_call in message.tool_calls:
@@ -359,13 +379,27 @@ class ThinkToolStrategy(BaseStrategy):
         
         # Max iterations reached, strip any <thinking> tags and return last response
         response = last_response
-        if response and response.choices:
-            message = response.choices[0].message
+        response_choices = (
+            cast(Any, getattr(response, "choices", None))  # type: ignore[attr-defined]
+            if response
+            else None
+        )
+        if response_choices:
+            message = response_choices[0].message  # type: ignore[attr-defined]
             if message.content:
                 message.content = strip_thinking_tags(message.content)
             # Store collected thoughts in reasoning_content field
+            reasoning_parts = [
+                "ThinkTool Trace:",
+                f"Model: {target_model}",
+                f"Iterations: {max_iterations}",
+                f"Tools: {', '.join([t['function']['name'] for t in all_tools])}",
+            ]
             if collected_thoughts:
-                message.reasoning_content = "\n\n".join(collected_thoughts)
+                reasoning_parts.append("")
+                reasoning_parts.append("Thoughts:")
+                reasoning_parts.extend(collected_thoughts)
+            message.reasoning_content = "\n".join(reasoning_parts)
         return response
 
 
@@ -381,4 +415,3 @@ def get_think_tool(swebench_style: bool = False) -> Dict[str, Any]:
         Tool definition dict compatible with OpenAI/Anthropic tool format
     """
     return THINK_TOOL_DEFINITION_SWEBENCH if swebench_style else THINK_TOOL_DEFINITION
-
