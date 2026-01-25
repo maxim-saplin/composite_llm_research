@@ -51,30 +51,26 @@ litellm.failure_callback = [log_failure]
 register_composite_provider()
 
 
-# Mocking for Demonstration Purposes (if no API key)
-if not os.environ.get("OPENAI_API_KEY") and not os.environ.get("LITELLM_API_KEY"):
-    print(
-        "No OPENAI_API_KEY or LITELLM_API_KEY found. Enabling Mock Mode for demonstration."
+def _has_any_api_key() -> bool:
+    return bool(
+        os.environ.get("OPENAI_API_KEY")
+        or os.environ.get("LITELLM_API_KEY")
+        or os.environ.get("CEREBRAS_API_KEY")
     )
 
-    def mock_completion(model, messages, **kwargs):
-        class MockMessage:
-            content = f"Mock response from {model}"
 
-        class MockChoice:
-            message = MockMessage()
+def _extract_message_content(resp: Any) -> str:
+    if isinstance(resp, dict):
+        try:
+            return str(resp["choices"][0]["message"].get("content", "") or "")
+        except Exception:
+            return ""
 
-        class MockResponse:
-            choices = [MockChoice()]
-            usage = type(
-                "obj",
-                (object,),
-                {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
-            )
-
-        return MockResponse()
-
-    litellm.completion = mock_completion
+    try:
+        message = resp.choices[0].message
+        return str(getattr(message, "content", "") or "")
+    except Exception:
+        return ""
 
 # --- DEMO ---
 
@@ -177,15 +173,7 @@ def run_demo():
                     ),
                 )
 
-                response_message = None
-                try:
-                    response_message = resp.choices[0].message
-                except Exception:
-                    pass
-
-                content = ""
-                if response_message is not None:
-                    content = str(getattr(response_message, "content", "") or "")
+                content = _extract_message_content(resp)
 
                 # Format and display the full response
                 formatted = format_response(content, width=70)
@@ -244,4 +232,10 @@ def run_demo():
 
 
 if __name__ == "__main__":
+    if not _has_any_api_key():
+        print(
+            "No OPENAI_API_KEY/LITELLM_API_KEY/CEREBRAS_API_KEY found. "
+            "Runs will likely error."
+        )
+
     run_demo()
