@@ -230,7 +230,7 @@ def run_demo():
             f"{Colors.CYAN}💡 Tip: Enable logging via config to write llm_logs.jsonl{Colors.RESET}"
         )
     print(
-        f"{Colors.CYAN}💡 Run 'streamlit run dashboard.py' for interactive dashboard{Colors.RESET}"
+        f"{Colors.CYAN}💡 Run 'streamlit run scripts/dashboard.py' for interactive dashboard{Colors.RESET}"
     )
 
 
