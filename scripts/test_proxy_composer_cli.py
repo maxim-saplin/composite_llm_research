@@ -3,8 +3,8 @@ import subprocess
 import time
 import urllib.request
 
-CONFIG_PATH = "/Users/admin/src/composite_llm_research/litellm_proxy.example.yaml"
-LOG_PATH = "/tmp/composite_proxy_cli_test.log"
+CONFIG_PATH = "./litellm_proxy.example.yaml"
+LOG_PATH = "./composite_proxy_cli_test.log"
 
 
 def main() -> None:
