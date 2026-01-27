@@ -1,0 +1,88 @@
+# Example LiteLLM proxy config for composite_llm.
+# Copy to litellm_proxy.yaml and adjust to your providers/models.
+
+litellm_settings:
+  # Register the composite provider (LiteLLM loads this handler at startup).
+  custom_provider_map:
+    - provider: composite
+      custom_handler: composite_llm.litellm_provider.COMPOSITE_PROVIDER
+
+model_list:
+  # Public proxy model names -> composite profiles.
+  - model_name: moa_light
+    litellm_params:
+      model: composite/profile/moa_light
+      custom_llm_provider: composite
+  - model_name: moa_hard
+    litellm_params:
+      model: composite/profile/moa_hard
+      custom_llm_provider: composite
+  - model_name: council_basic
+    litellm_params:
+      model: composite/profile/council_basic
+      custom_llm_provider: composite
+
+general_settings:
+  composite_llm:
+    # Composite provider config: providers + profiles.
+    # Optional file logging for composite requests:
+    # observability:
+    #   enabled: true
+    #   log_file: llm_logs.jsonl
+    strategy_registry:
+      moa: composite_llm.strategies.moa:MoAStrategy
+      council: composite_llm.strategies.council:CouncilStrategy
+    providers:
+      # Provider bundles let nodes share API settings.
+      cerebras_default:
+        litellm_params:
+          api_key: os.environ/CEREBRAS_API_KEY
+      openai_test:
+        litellm_params:
+          api_base: os.environ/OPENAI_API_BASE
+          api_key: os.environ/OPENAI_API_KEY
+    profiles:
+      # Profiles define the full topology for a strategy.
+      moa_light:
+        strategy: moa
+        topology:
+          aggregator:
+            model: cerebras/llama-3.3-70b
+            provider: cerebras_default
+          proposers:
+            - model: cerebras/llama3.1-8b
+              provider: cerebras_default
+          settings:
+            max_tool_iterations: 5
+      moa_hard:
+        strategy: moa
+        topology:
+          aggregator:
+            model: cerebras/llama-3.3-70b
+            provider: cerebras_default
+          proposers:
+            - model: cerebras/llama3.1-8b
+              provider: cerebras_default
+            - model: cerebras/qwen-3-32b
+              provider: cerebras_default
+          settings:
+            max_tool_iterations: 5
+      council_basic:
+        strategy: council
+        topology:
+          chairman:
+            model: openai/chairman-model
+            provider: openai_test
+          council:
+            - model: openai/proposer-1
+              provider: openai_test
+            - model: openai/proposer-2
+              provider: openai_test
+          reviewers:
+            - model: openai/reviewer-1
+              provider: openai_test
+            - model: openai/reviewer-2
+              provider: openai_test
+          settings:
+            max_council_size: 4
+            include_stage_summaries_in_reasoning: true

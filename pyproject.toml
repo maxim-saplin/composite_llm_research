@@ -3,11 +3,13 @@ name = "composite-llm"
 version = "0.1.0"
 description = "Composite LLM Strategies"
 dependencies = [
-    "litellm>=1.81.1",
-    "python-dotenv>=1.2.1",
+    "litellm[proxy]>=1.81.1",
+    "pydantic>=2.11.0",
+    "python-dotenv>=1.0.0",
+    "uvicorn>=0.30.0",
 ]
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.11,<=3.13"
 
 [project.optional-dependencies]
 dashboard = ["streamlit>=1.53.0", "pandas>=2.3.3", "plotly>=6.5.2"]

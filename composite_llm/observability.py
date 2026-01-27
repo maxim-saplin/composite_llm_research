@@ -2,8 +2,26 @@ import json
 import time
 import os
 from datetime import datetime
+from typing import Any, Dict
 
 LOG_FILE = "llm_logs.jsonl"
+_LOGGING_ENABLED = False
+
+
+def configure_observability(config: Dict[str, Any] | None) -> None:
+    global LOG_FILE, _LOGGING_ENABLED
+    if not isinstance(config, dict):
+        return
+    enabled = config.get("enabled")
+    if isinstance(enabled, bool):
+        _LOGGING_ENABLED = enabled
+    log_file = config.get("log_file")
+    if isinstance(log_file, str) and log_file.strip():
+        LOG_FILE = log_file
+
+
+def is_logging_enabled() -> bool:
+    return _LOGGING_ENABLED
 
 
 def log_success(kwargs, response_obj, start_time, end_time):
@@ -13,6 +31,8 @@ def log_success(kwargs, response_obj, start_time, end_time):
     response_obj: the ModelResponse object
     """
     try:
+        if not _LOGGING_ENABLED:
+            return
         # litellm passes datetime objects or timestamps depending on version/context
         # If they are datetime objects, we can subtract directly to get timedelta
         if isinstance(end_time, datetime) and isinstance(start_time, datetime):
@@ -90,6 +110,8 @@ def log_success(kwargs, response_obj, start_time, end_time):
 def log_failure(kwargs, exception, start_time, end_time):
     """Callback for failed API calls."""
     try:
+        if not _LOGGING_ENABLED:
+            return
         if isinstance(end_time, datetime) and isinstance(start_time, datetime):
             duration = (end_time - start_time).total_seconds()
             timestamp_str = end_time.isoformat()

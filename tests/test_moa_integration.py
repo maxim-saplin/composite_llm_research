@@ -1,12 +1,28 @@
 from typing import Any, cast
+from pathlib import Path
 
 import litellm
 
-from composite_llm.litellm_provider import register_composite_provider
+from composite_llm.litellm_provider import get_composite_provider
+
+
+def _setup_composite_provider_from_config() -> None:
+    repo = Path(__file__).resolve().parents[1]
+    config_path = repo / "litellm_proxy.yaml"
+    if not config_path.exists():
+        config_path = repo / "litellm_proxy.example.yaml"
+    config_file_path = str(config_path)
+
+    # Mirror LiteLLM proxy's YAML custom_provider_map behavior.
+    provider = get_composite_provider(config_file_path=config_file_path)
+    litellm.custom_provider_map = [{"provider": "composite", "custom_handler": provider}]
+    from litellm.utils import custom_llm_setup
+
+    custom_llm_setup()
 
 
 def test_moa_integration_returns_trace_and_usage() -> None:
-    register_composite_provider()
+    _setup_composite_provider_from_config()
 
     response = cast(Any, litellm.completion(
         model="composite/moa/openai/aggregator-model",

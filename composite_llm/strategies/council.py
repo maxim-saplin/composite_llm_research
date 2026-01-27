@@ -99,21 +99,57 @@ class CouncilStrategy(BaseStrategy):
         litellm_params: Dict[str, Any],
     ) -> Any:
         # Configuration
-        council_models = optional_params.get("council_models") or DEFAULT_COUNCIL_MODELS
-        review_models = optional_params.get("review_models") or council_models
-        chairman_model = (
-            optional_params.get("chairman_model")
-            or model_config
-            or (council_models[0] if council_models else "openai/gpt-4.1-mini")
+        def _normalize_node_list(raw: Any) -> List[Dict[str, Any]]:
+            nodes: List[Dict[str, Any]] = []
+            if isinstance(raw, list):
+                for item in raw:
+                    if isinstance(item, dict) and isinstance(item.get("model"), str):
+                        nodes.append(item)
+                    elif isinstance(item, str):
+                        nodes.append({"model": item})
+            return nodes
+
+        council_nodes = _normalize_node_list(
+            optional_params.get("council")
+            or optional_params.get("council_models")
+            or DEFAULT_COUNCIL_MODELS
         )
+        if not council_nodes:
+            council_nodes = [{"model": model} for model in DEFAULT_COUNCIL_MODELS]
+
+        review_nodes = _normalize_node_list(
+            optional_params.get("reviewers") or optional_params.get("review_models")
+        )
+        if not review_nodes:
+            review_nodes = list(council_nodes)
+
+        chairman_node = optional_params.get("chairman")
+        if isinstance(chairman_node, dict) and isinstance(chairman_node.get("model"), str):
+            chairman_model = chairman_node["model"]
+            chairman_params = {
+                **litellm_params,
+                **cast(Dict[str, Any], chairman_node.get("litellm_params") or {}),
+            }
+        else:
+            chairman_model = (
+                optional_params.get("chairman_model")
+                or model_config
+                or (council_nodes[0]["model"] if council_nodes else "openai/gpt-4.1-mini")
+            )
+            chairman_params = dict(litellm_params)
+
+        council_models = [node["model"] for node in council_nodes]
+        review_models = [node["model"] for node in review_nodes]
         max_council_size = optional_params.get("max_council_size")
         include_stage_summaries = optional_params.get(
             "include_stage_summaries_in_reasoning", True
         )
 
         if max_council_size is not None and max_council_size > 0:
-            council_models = council_models[:max_council_size]
-            review_models = review_models[:max_council_size]
+            council_nodes = council_nodes[:max_council_size]
+            review_nodes = review_nodes[:max_council_size]
+            council_models = [node["model"] for node in council_nodes]
+            review_models = [node["model"] for node in review_nodes]
 
         trace_recorder = optional_params.get("trace_recorder")
         trace_root_id = optional_params.get("trace_root_node_id")
@@ -147,7 +183,7 @@ class CouncilStrategy(BaseStrategy):
 
             start = time.time()
             final_response = self.simple_completion(
-                model=final_model, messages=final_messages, **litellm_params
+                model=final_model, messages=final_messages, **chairman_params
             )
             duration = time.time() - start
             final_usage = extract_usage_metrics(final_response)
@@ -185,11 +221,16 @@ class CouncilStrategy(BaseStrategy):
         # --- Stage 1: First Opinions ---
         council_answers: List[Dict[str, str]] = []
 
-        def _call_council_sync(model_name: str, alias: str) -> Dict[str, Any]:
+        def _call_council_sync(node: Dict[str, Any], alias: str) -> Dict[str, Any]:
+            model_name = cast(str, node.get("model"))
+            node_params = {
+                **litellm_params,
+                **cast(Dict[str, Any], node.get("litellm_params") or {}),
+            }
             try:
                 start = time.time()
                 response = self.simple_completion(
-                    model=model_name, messages=messages, **litellm_params
+                    model=model_name, messages=messages, **node_params
                 )
                 duration = time.time() - start
                 response_choices = cast(Any, getattr(response, "choices", None))  # type: ignore[attr-defined]
@@ -215,17 +256,17 @@ class CouncilStrategy(BaseStrategy):
                     "error": str(e),
                 }
 
-        async def _call_council_async(model_name: str, alias: str) -> Dict[str, Any]:
-            return await asyncio.to_thread(_call_council_sync, model_name, alias)
+        async def _call_council_async(node: Dict[str, Any], alias: str) -> Dict[str, Any]:
+            return await asyncio.to_thread(_call_council_sync, node, alias)
 
         council_results = self._run_async_tasks(
             lambda: [
-                _call_council_async(model_name, f"Assistant {idx + 1}")
-                for idx, model_name in enumerate(council_models)
+                _call_council_async(node, f"Assistant {idx + 1}")
+                for idx, node in enumerate(council_nodes)
             ],
             fallback=lambda: [
-                _call_council_sync(model_name, f"Assistant {idx + 1}")
-                for idx, model_name in enumerate(council_models)
+                _call_council_sync(node, f"Assistant {idx + 1}")
+                for idx, node in enumerate(council_nodes)
             ],
         )
 
@@ -272,8 +313,13 @@ class CouncilStrategy(BaseStrategy):
         num_reviewers = min(len(council_answers), len(review_models))
 
         def _call_reviewer_sync(
-            reviewer_model: str, reviewer_alias: str
+            reviewer_node: Dict[str, Any], reviewer_alias: str
         ) -> Dict[str, Any]:
+            reviewer_model = cast(str, reviewer_node.get("model"))
+            reviewer_params = {
+                **litellm_params,
+                **cast(Dict[str, Any], reviewer_node.get("litellm_params") or {}),
+            }
             review_messages = [m.copy() for m in messages]
             review_messages.append(
                 {
@@ -299,7 +345,7 @@ class CouncilStrategy(BaseStrategy):
                 review_resp = self.simple_completion(
                     model=reviewer_model,
                     messages=review_messages,
-                    **litellm_params,
+                    **reviewer_params,
                 )
                 duration = time.time() - start
                 review_choices = cast(Any, getattr(review_resp, "choices", None))  # type: ignore[attr-defined]
@@ -326,19 +372,19 @@ class CouncilStrategy(BaseStrategy):
                 }
 
         async def _call_reviewer_async(
-            reviewer_model: str, reviewer_alias: str
+            reviewer_node: Dict[str, Any], reviewer_alias: str
         ) -> Dict[str, Any]:
             return await asyncio.to_thread(
-                _call_reviewer_sync, reviewer_model, reviewer_alias
+                _call_reviewer_sync, reviewer_node, reviewer_alias
             )
 
         review_results = self._run_async_tasks(
             lambda: [
-                _call_reviewer_async(review_models[i], f"Reviewer {i + 1}")
+                _call_reviewer_async(review_nodes[i], f"Reviewer {i + 1}")
                 for i in range(num_reviewers)
             ],
             fallback=lambda: [
-                _call_reviewer_sync(review_models[i], f"Reviewer {i + 1}")
+                _call_reviewer_sync(review_nodes[i], f"Reviewer {i + 1}")
                 for i in range(num_reviewers)
             ],
         )
@@ -484,7 +530,7 @@ class CouncilStrategy(BaseStrategy):
         final_response = self.simple_completion(
             model=chairman_model,
             messages=chairman_messages,
-            **litellm_params,
+            **chairman_params,
         )
         duration = time.time() - start
         final_usage = extract_usage_metrics(final_response)

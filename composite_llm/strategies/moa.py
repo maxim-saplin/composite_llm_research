@@ -8,6 +8,13 @@ from .base import BaseStrategy
 from ..trace import extract_usage_metrics
 
 
+def _compact_text(text: str, max_len: int = 160) -> str:
+    normalized = " ".join(text.split())
+    if len(normalized) <= max_len:
+        return normalized
+    return f"{normalized[: max_len - 3]}..."
+
+
 class MoAStrategy(BaseStrategy):
     def _run_async_tasks(
         self,
@@ -41,9 +48,38 @@ class MoAStrategy(BaseStrategy):
         3. Send all responses + original query to Aggregator model (model_config) to synthesize final answer.
         """
 
-        proposers = optional_params.get(
+        raw_proposers = optional_params.get(
             "proposers", ["cerebras/llama3.1-8b", "cerebras/qwen-3-32b"]
         )
+
+        proposer_nodes: List[Dict[str, Any]] = []
+        if isinstance(raw_proposers, list):
+            for item in raw_proposers:
+                if isinstance(item, dict) and isinstance(item.get("model"), str):
+                    proposer_nodes.append(item)
+                elif isinstance(item, str):
+                    proposer_nodes.append({"model": item})
+
+        if not proposer_nodes:
+            proposer_nodes = [
+                {"model": "cerebras/llama3.1-8b"},
+                {"model": "cerebras/qwen-3-32b"},
+            ]
+
+        proposer_models = [node["model"] for node in proposer_nodes]
+
+        aggregator_node = optional_params.get("aggregator")
+        if isinstance(aggregator_node, dict) and isinstance(
+            aggregator_node.get("model"), str
+        ):
+            aggregator_model = aggregator_node["model"]
+            aggregator_params = {
+                **litellm_params,
+                **cast(Dict[str, Any], aggregator_node.get("litellm_params") or {}),
+            }
+        else:
+            aggregator_model = model_config
+            aggregator_params = dict(litellm_params)
 
         trace_recorder = optional_params.get("trace_recorder")
         trace_root_id = optional_params.get("trace_root_node_id")
@@ -56,12 +92,12 @@ class MoAStrategy(BaseStrategy):
             strategy_node_id = trace_recorder.add_node(
                 step_type="strategy",
                 parent_id=trace_root_id,
-                model=model_config,
+                model=aggregator_model,
                 content_preview="MoA strategy execution",
             )
 
         if resume_state:
-            final_model = resume_state.get("model", model_config)
+            final_model = resume_state.get("model", aggregator_model)
             final_messages = resume_state.get("messages") or messages
             reasoning_content = resume_state.get("reasoning_content")
             tool_trace = resume_state.get("tool_trace") or []
@@ -77,7 +113,7 @@ class MoAStrategy(BaseStrategy):
 
             start = time.time()
             final_response = self.simple_completion(
-                model=final_model, messages=final_messages, **litellm_params
+                model=final_model, messages=final_messages, **aggregator_params
             )
             duration = time.time() - start
             usage = extract_usage_metrics(final_response)
@@ -117,13 +153,18 @@ class MoAStrategy(BaseStrategy):
         # Step 1: Parallel calls to proposers
         proposer_responses: List[str] = []
 
-        print(f"  [MoA] Querying proposers: {proposers}")
+        print(f"  [MoA] Querying proposers: {proposer_models}")
 
-        def _call_proposer_sync(p_model: str) -> Dict[str, Any]:
+        def _call_proposer_sync(node: Dict[str, Any]) -> Dict[str, Any]:
+            p_model = cast(str, node.get("model"))
+            node_params = {
+                **litellm_params,
+                **cast(Dict[str, Any], node.get("litellm_params") or {}),
+            }
             try:
                 start = time.time()
                 resp = self.simple_completion(
-                    model=p_model, messages=messages, **litellm_params
+                    model=p_model, messages=messages, **node_params
                 )
                 duration = time.time() - start
                 resp_choices = cast(Any, getattr(resp, "choices", None))
@@ -147,12 +188,12 @@ class MoAStrategy(BaseStrategy):
                     "error": str(e),
                 }
 
-        async def _call_proposer_async(p_model: str) -> Dict[str, Any]:
-            return await asyncio.to_thread(_call_proposer_sync, p_model)
+        async def _call_proposer_async(node: Dict[str, Any]) -> Dict[str, Any]:
+            return await asyncio.to_thread(_call_proposer_sync, node)
 
         proposer_results = self._run_async_tasks(
-            lambda: [_call_proposer_async(p_model) for p_model in proposers],
-            fallback=lambda: [_call_proposer_sync(p_model) for p_model in proposers],
+            lambda: [_call_proposer_async(node) for node in proposer_nodes],
+            fallback=lambda: [_call_proposer_sync(node) for node in proposer_nodes],
         )
 
         for result in proposer_results:
@@ -224,12 +265,30 @@ class MoAStrategy(BaseStrategy):
                 }
             )
 
-        print(f"  [MoA] Aggregating with {model_config}")
+        print(f"  [MoA] Aggregating with {aggregator_model}")
+        proposer_summary_lines: List[str] = ["Proposer summaries:"]
+        if proposer_results:
+            for result in proposer_results:
+                model_name = result["model"]
+                if result.get("error"):
+                    summary = f"ERROR: {result['error']}"
+                else:
+                    summary = _compact_text(result.get("content") or "")
+                    if not summary:
+                        summary = "(empty response)"
+                proposer_summary_lines.append(f"- {model_name}: {summary}")
+        else:
+            proposer_summary_lines.append("- none")
+
         reasoning_content = "\n".join(
             [
                 "MoA Trace:",
-                f"Proposers: {', '.join(proposers)}" if proposers else "Proposers: none",
-                f"Aggregator: {model_config}",
+                f"Proposers: {', '.join(proposer_models)}"
+                if proposer_models
+                else "Proposers: none",
+                f"Aggregator: {aggregator_model}",
+                "",
+                "\n".join(proposer_summary_lines).strip(),
             ]
         )
         tool_trace: List[str] = []
@@ -241,7 +300,7 @@ class MoAStrategy(BaseStrategy):
         if isinstance(final_stage, dict):
             final_stage.update(
                 {
-                    "model": model_config,
+                    "model": aggregator_model,
                     "messages": [m.copy() for m in aggregator_messages],
                     "reasoning_content": reasoning_content,
                     "tool_trace": tool_trace,
@@ -251,7 +310,9 @@ class MoAStrategy(BaseStrategy):
 
         start = time.time()
         final_response = self.simple_completion(
-            model=model_config, messages=aggregator_messages, **litellm_params
+            model=aggregator_model,
+            messages=aggregator_messages,
+            **aggregator_params,
         )
         duration = time.time() - start
         usage = extract_usage_metrics(final_response)
@@ -265,7 +326,7 @@ class MoAStrategy(BaseStrategy):
             trace_recorder.add_node(
                 step_type="aggregation",
                 parent_id=strategy_node_id,
-                model=model_config,
+                model=aggregator_model,
                 role="assistant",
                 content_preview=content[:200],
                 duration_seconds=duration,

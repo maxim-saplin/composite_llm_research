@@ -1,8 +1,8 @@
 # Composite LLM Research
 
-This repository contains research and implementation for Composite LLM patterns (MoA, Council) compatible with `litellm`.
+This repository contains a working implementation of Composite LLM patterns (MoA, Council) compatible with LiteLLM.
 
-See [DESIGN.md](DESIGN.md) for detailed architecture and usage.
+For the detailed technical layout, see [TECH.md](TECH.md).
 
 ## Example
 
@@ -18,9 +18,13 @@ Task: How many r's in strawberry?
   ✓ MoA (Agg: 70b, Prop: [8b, Qwen]) → ...he conclusion that there are 3 "r"s in the word "strawberry". Therefore, the final answer is: **3**.
 ```
 
-## Setup
+## High-level overview
 
-Requires Python >=3.13. `uv venv` uses the most recent installed Python unless you pass `--python` and reuses an existing `.venv`.
+- Composite strategies are implemented in Python and exposed as a LiteLLM custom provider.
+- The proxy exposes public model names via `model_list` and maps them to composite profiles.
+- Profiles define the full topology (nodes + settings) in YAML.
+
+## Setup
 
 ```bash
 uv venv
@@ -35,6 +39,25 @@ Set API keys (either works for the demo):
 
 Composite strategy model string format: `composite/<strategy>/<provider>/<model>`.
 Example: `composite/council/cerebras/llama-3.3-70b`.
+
+Profile-based model string format (recommended for proxy): `composite/profile/<name>`.
+Example: `composite/profile/moa_light`.
+
+## Configs
+
+- Example proxy config: [litellm_proxy.example.yaml](litellm_proxy.example.yaml)
+- Sample env file: [sample.env](sample.env)
+- Proxy launcher (sources .env): [scripts/run_proxy_from_env.sh](scripts/run_proxy_from_env.sh)
+
+## Proxy config
+
+Use the checked-in example config as a starting point, then copy it locally:
+
+```bash
+cp litellm_proxy.example.yaml litellm_proxy.yaml
+```
+
+See [PROXY_USAGE.md](PROXY_USAGE.md) for full proxy instructions.
 
 ## Troubleshooting
 
@@ -71,12 +94,31 @@ resp = litellm.completion(
 print(resp.choices[0].message.content)
 ```
 
+## Demo scripts
+
+- Plain demo: [demo.py](demo.py)
+- Proxy demo: [scripts/demo_proxy.py](scripts/demo_proxy.py)
+  - First run the proxy via chmod +x `scripts/run_proxy_from_env.sh` and `./scripts/run_proxy_from_env.sh`
+
 ## Demo + Tests
 
 Run the demo:
 
 ```bash
 python demo.py
+```
+
+Run the profile-based demo:
+
+```bash
+python demo_profiles.py
+```
+
+Run the proxy demo (pretty output):
+
+```bash
+litellm --config litellm_proxy.example.yaml --host 0.0.0.0 --port 4000
+python scripts/demo_proxy.py --base-url http://localhost:4000
 ```
 
 Run the integration tests (includes a fake OpenAI-compatible server):

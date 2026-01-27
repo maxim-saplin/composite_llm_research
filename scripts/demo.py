@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 import textwrap
 from typing import Any, cast
 from dotenv import load_dotenv
@@ -40,14 +41,11 @@ def format_response(content: str, width: int = 80) -> str:
     return "\n".join(formatted_lines)
 
 
-load_dotenv()
+_ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
+load_dotenv(dotenv_path=_ENV_PATH, override=True)
 
 # Silence LiteLLM provider list warnings
 litellm.suppress_debug_info = True
-
-# Ensure Cerebras has a usable API key if only LITELLM_API_KEY is set
-if not os.environ.get("CEREBRAS_API_KEY") and os.environ.get("LITELLM_API_KEY"):
-    os.environ["CEREBRAS_API_KEY"] = os.environ["LITELLM_API_KEY"]
 
 # 1. Register Observability Callbacks
 litellm.success_callback = [log_success]
@@ -58,11 +56,7 @@ register_composite_provider()
 
 
 def _has_any_api_key() -> bool:
-    return bool(
-        os.environ.get("OPENAI_API_KEY")
-        or os.environ.get("LITELLM_API_KEY")
-        or os.environ.get("CEREBRAS_API_KEY")
-    )
+    return bool(os.environ.get("CEREBRAS_API_KEY") or os.environ.get("OPENAI_API_KEY"))
 
 
 def _extract_message_content(resp: Any) -> str:
@@ -152,17 +146,9 @@ def run_demo():
             print(f"{Colors.DIM}{'─' * 50}{Colors.RESET}")
 
             try:
-                # Prepare args
                 kwargs = {}
                 if "params" in config:
                     kwargs["optional_params"] = config["params"]
-                if "cerebras/" in config["model"]:
-                    api_key = os.environ.get("CEREBRAS_API_KEY") or os.environ.get(
-                        "LITELLM_API_KEY"
-                    )
-                    if api_key:
-                        kwargs["api_key"] = api_key
-
                 resp = cast(
                     Any,
                     litellm.completion(
@@ -238,8 +224,7 @@ def run_demo():
 if __name__ == "__main__":
     if not _has_any_api_key():
         print(
-            "No OPENAI_API_KEY/LITELLM_API_KEY/CEREBRAS_API_KEY found. "
-            "Runs will likely error."
+            "No CEREBRAS_API_KEY/OPENAI_API_KEY found. Runs will likely error."
         )
 
     run_demo()
