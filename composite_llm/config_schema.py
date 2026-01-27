@@ -36,6 +36,13 @@ class CouncilTopology(BaseModel):
     settings: Dict[str, Any] = Field(default_factory=dict)
 
 
+class ComposerCliTopology(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    model: str
+    settings: Dict[str, Any] = Field(default_factory=dict)
+
+
 class Profile(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -48,6 +55,8 @@ class Profile(BaseModel):
             self.topology = MoATopology.model_validate(self.topology).model_dump()
         elif self.strategy == "council":
             self.topology = CouncilTopology.model_validate(self.topology).model_dump()
+        elif self.strategy in {"composer-cli", "composer_cli"}:
+            self.topology = ComposerCliTopology.model_validate(self.topology).model_dump()
         else:
             raise ValueError(f"Unsupported strategy: {self.strategy}")
         return self
@@ -81,6 +90,8 @@ class CompositeConfig(BaseModel):
                     NodeConfig.model_validate(node)
                     for node in (topology.get("reviewers") or [])
                 )
+            elif profile.strategy in {"composer-cli", "composer_cli"}:
+                nodes = []
 
             for node in nodes:
                 if node.provider and node.provider not in provider_names:

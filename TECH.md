@@ -2,7 +2,7 @@
 
 ## Architecture
 
-The system is a LiteLLM custom provider that orchestrates multi‑model strategies (MoA, Council). It can run:
+The system is a LiteLLM custom provider that orchestrates multi‑model strategies (MoA, Council, Composer CLI). It can run:
 
 - Direct Python calls (via `litellm.completion()` with composite model strings).
 - LiteLLM proxy calls (via `model_list` + custom provider registration in YAML).
@@ -12,6 +12,7 @@ Key modules:
 - [composite_llm/litellm_provider.py](composite_llm/litellm_provider.py): provider entrypoint, model parsing, profile resolution, and request execution.
 - [composite_llm/strategies/moa.py](composite_llm/strategies/moa.py): Mixture‑of‑Agents strategy.
 - [composite_llm/strategies/council.py](composite_llm/strategies/council.py): Council strategy.
+- [composite_llm/strategies/composer_cli.py](composite_llm/strategies/composer_cli.py): Composer CLI strategy.
 - [composite_llm/config_schema.py](composite_llm/config_schema.py): YAML schema validation for profiles and provider bundles.
 - [composite_llm/observability.py](composite_llm/observability.py): optional file logging.
 
@@ -21,6 +22,7 @@ Supported model strings:
 
 - `composite/<strategy>/<provider>/<model>` (legacy, direct calls)
 - `composite/profile/<name>` (recommended for proxy)
+- `composite/composer-cli/<model>` (direct Composer CLI calls)
 
 When using profiles, the provider resolves the profile topology from YAML and materializes per‑node LiteLLM params, then executes the strategy.
 
@@ -49,7 +51,7 @@ Profiles are explicit (no implicit defaults). Each profile defines its full node
 
 A profile defines:
 
-- `strategy`: `moa` or `council`.
+- `strategy`: `moa`, `council`, or `composer-cli`.
 - `topology`: strategy‑specific node lists and `settings`.
 
 Nodes look like:
@@ -59,6 +61,11 @@ Nodes look like:
 - `params`: per‑node overrides (merged on top of provider bundle).
 
 The provider resolves provider bundles and node params and passes them to the strategy.
+
+Composer CLI profiles use a simplified topology:
+
+- `model`: Composer CLI model name (e.g., `composer-1`).
+- `settings`: optional CLI settings (e.g., `timeout_seconds`, `max_output_bytes`, `cli_command`).
 
 ## Strategy execution
 
@@ -74,6 +81,12 @@ The provider resolves provider bundles and node params and passes them to the st
 - Stage 2: reviewers critique and rank.
 - Stage 3: chairman synthesizes.
 - Trace is attached to `reasoning_content` with compact stage summaries.
+
+### Composer CLI
+
+- Serializes the full transcript into a plain-text prompt with role delimiters.
+- Runs the `agent` CLI in an empty temporary directory and treats stdout as the final assistant message.
+- Captures exit codes and stderr summaries in trace nodes.
 
 ## Overrides and params
 
@@ -117,6 +130,6 @@ Run:
 
 ## Known constraints
 
-- Only `moa` and `council` are implemented.
+- `composer-cli` requires the `agent` binary on PATH.
 - No implicit strategy defaults; profiles must be explicit.
 - Profile validation is schema‑based and rejects unknown provider references.

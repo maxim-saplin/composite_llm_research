@@ -21,6 +21,10 @@ model_list:
     litellm_params:
       model: composite/profile/council_basic
       custom_llm_provider: composite
+  - model_name: composer_cli
+    litellm_params:
+      model: composite/profile/composer_cli
+      custom_llm_provider: composite
 
 general_settings:
   composite_llm:
@@ -32,6 +36,7 @@ general_settings:
     strategy_registry:
       moa: composite_llm.strategies.moa:MoAStrategy
       council: composite_llm.strategies.council:CouncilStrategy
+      composer-cli: composite_llm.strategies.composer_cli:ComposerCliStrategy
     providers:
       # Provider bundles let nodes share API settings.
       cerebras_default:
@@ -86,3 +91,10 @@ general_settings:
           settings:
             max_council_size: 4
             include_stage_summaries_in_reasoning: true
+      composer_cli:
+        strategy: composer-cli
+        topology:
+          model: composer-1
+          settings:
+            timeout_seconds: 30
+            max_output_bytes: 65536

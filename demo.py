@@ -1,4 +1,5 @@
 import os
+import shutil
 import textwrap
 from typing import Any, cast
 from dotenv import load_dotenv
@@ -127,6 +128,18 @@ def run_demo():
             "params": get_council_params(),
         },
     ]
+
+    if shutil.which("agent"):
+        configs.append(
+            {
+                "name": "Composer CLI (agent)",
+                "model": "composite/composer-cli/composer-1",
+                "type": "composite",
+                "params": {"timeout_seconds": 30},
+            }
+        )
+    else:
+        print("[demo] Skipping Composer CLI: 'agent' not found on PATH.")
 
     results = []
 

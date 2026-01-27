@@ -93,7 +93,7 @@ def main() -> int:
     parser.add_argument("--base-url", default="http://localhost:4000", help="Proxy base URL")
     parser.add_argument(
         "--models",
-        default="moa_light,moa_hard,council_basic",
+        default="moa_light,moa_hard,council_basic,composer_cli",
         help="Comma-separated proxy model names",
     )
     parser.add_argument(

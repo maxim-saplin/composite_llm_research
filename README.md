@@ -1,6 +1,6 @@
 # Composite LLM Research
 
-This repository contains a working implementation of Composite LLM patterns (MoA, Council) compatible with LiteLLM.
+This repository contains a working implementation of Composite LLM patterns (MoA, Council, Composer CLI) compatible with LiteLLM.
 
 For the detailed technical layout, see [TECH.md](TECH.md).
 
@@ -39,6 +39,9 @@ Set API keys (either works for the demo):
 
 Composite strategy model string format: `composite/<strategy>/<provider>/<model>`.
 Example: `composite/council/cerebras/llama-3.3-70b`.
+
+Composer CLI model string format: `composite/composer-cli/<model>`.
+Example: `composite/composer-cli/composer-1`.
 
 Profile-based model string format (recommended for proxy): `composite/profile/<name>`.
 Example: `composite/profile/moa_light`.
@@ -99,6 +102,7 @@ print(resp.choices[0].message.content)
 - Plain demo: [demo.py](demo.py)
 - Proxy demo: [scripts/demo_proxy.py](scripts/demo_proxy.py)
   - First run the proxy via chmod +x `scripts/run_proxy_from_env.sh` and `./scripts/run_proxy_from_env.sh`
+- Proxy + Composer CLI test: [scripts/test_proxy_composer_cli.py](scripts/test_proxy_composer_cli.py)
 
 ## Demo + Tests
 
@@ -119,6 +123,12 @@ Run the proxy demo (pretty output):
 ```bash
 litellm --config litellm_proxy.example.yaml --host 0.0.0.0 --port 4000
 python scripts/demo_proxy.py --base-url http://localhost:4000
+```
+
+Run the proxy + Composer CLI test (requires `agent` on PATH):
+
+```bash
+python scripts/test_proxy_composer_cli.py
 ```
 
 Run the integration tests (includes a fake OpenAI-compatible server):

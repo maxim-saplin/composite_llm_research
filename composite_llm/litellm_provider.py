@@ -18,6 +18,7 @@ from .trace import TraceRecorder, get_user_request_preview
 DEFAULT_STRATEGY_REGISTRY: Dict[str, str] = {
     "moa": "composite_llm.strategies.moa:MoAStrategy",
     "council": "composite_llm.strategies.council:CouncilStrategy",
+    "composer-cli": "composite_llm.strategies.composer_cli:ComposerCliStrategy",
 }
 
 
@@ -118,7 +119,7 @@ def _parse_composite_model(model: str) -> Tuple[str, str, str, str, Optional[str
         root_model = model
         return strategy_name, target_model, root_model, "composite", None
 
-    if parts and parts[0] in {"moa", "council"}:
+    if parts and parts[0] in {"moa", "council", "composer-cli", "composer_cli"}:
         if len(parts) < 2:
             raise ValueError(
                 f"Invalid composite model string: {model}. Expected '<strategy>/<model>'."
@@ -340,6 +341,12 @@ class CompositeLiteLLMProvider:
                 )
                 if reviewers_nodes:
                     profile_optional_params["reviewers"] = reviewers_nodes
+            elif profile.strategy in {"composer-cli", "composer_cli"}:
+                model_override = topology.get("model")
+                if not isinstance(model_override, str) or not model_override:
+                    raise ValueError(
+                        f"Profile '{profile_name}' requires a non-empty topology.model for composer-cli."
+                    )
             else:
                 raise ValueError(f"Unsupported profile strategy: {profile.strategy}")
 
