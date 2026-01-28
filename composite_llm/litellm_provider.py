@@ -189,10 +189,12 @@ class CompositeLiteLLMProvider:
         *,
         strategy_registry: Optional[Dict[str, Any]] = None,
         composite_config: Any = None,
+        config_file_path: Optional[str] = None,
     ):
         self.strategies: Dict[str, BaseStrategy] = {}
         self.strategy_registry: Dict[str, Any] = strategy_registry or {}
         self.composite_config = composite_config
+        self.config_file_path = config_file_path
 
     def _resolve_provider_bundle(self, provider_name: str) -> Dict[str, Any]:
         if not self.composite_config:
@@ -388,6 +390,8 @@ class CompositeLiteLLMProvider:
             run_optional_params["trace_root_node_id"] = root_node_id
             run_optional_params["final_stage"] = final_stage
             run_optional_params["tool_trace_context"] = list(tool_trace)
+            if self.config_file_path:
+                run_optional_params["config_file_path"] = self.config_file_path
             if resume_state:
                 run_optional_params["resume_state"] = resume_state
 
@@ -550,6 +554,7 @@ def get_composite_provider(
     return CompositeLiteLLMProvider(
         strategy_registry=cast(Optional[Dict[str, Any]], cfg.get("strategy_registry")),
         composite_config=cfg.get("composite_config"),
+        config_file_path=config_file_path,
     )
 
 

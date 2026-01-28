@@ -8,6 +8,9 @@ response. This strategy bypasses LiteLLM providers entirely.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
+import os
+from pathlib import Path
 import shutil
 import subprocess
 import tempfile
@@ -83,6 +86,47 @@ def _limit_bytes(data: bytes, max_bytes: int) -> tuple[bytes, bool]:
     return data[:max_bytes], True
 
 
+def _resolve_io_log_path(optional_params: Dict[str, Any]) -> Optional[str]:
+    if not isinstance(optional_params, dict):
+        return None
+    direct = optional_params.get("io_log_path")
+    if isinstance(direct, str) and direct.strip():
+        return direct.strip()
+    io_dir = optional_params.get("io_log_dir")
+    if isinstance(io_dir, str) and io_dir.strip():
+        ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")
+        return str(Path(io_dir).expanduser() / f"composer_cli_{ts}.log")
+    return None
+
+
+def _write_cli_io_log(
+    path: str,
+    *,
+    prompt: str,
+    stdout_text: str,
+    stderr_text: str,
+    meta: Dict[str, Any],
+) -> None:
+    try:
+        log_path = Path(path).expanduser()
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.utcnow().isoformat() + "Z"
+        with log_path.open("a", encoding="utf-8") as handle:
+            handle.write("=== Composer CLI IO ===\n")
+            handle.write(f"timestamp: {timestamp}\n")
+            for key, value in meta.items():
+                handle.write(f"{key}: {value}\n")
+            handle.write("\n--- PROMPT ---\n")
+            handle.write(prompt)
+            handle.write("\n\n--- STDOUT ---\n")
+            handle.write(stdout_text)
+            handle.write("\n\n--- STDERR ---\n")
+            handle.write(stderr_text)
+            handle.write("\n\n")
+    except Exception:
+        pass
+
+
 class ComposerCliStrategy(BaseStrategy):
     """
     Strategy that shells out to the Cursor `agent` CLI.
@@ -122,6 +166,7 @@ class ComposerCliStrategy(BaseStrategy):
             messages = resume_state.get("messages")  # type: ignore[assignment]
 
         prompt = _serialize_transcript(messages)
+        io_log_path = _resolve_io_log_path(optional_params)
 
         timeout_seconds = _coerce_timeout_seconds(
             optional_params.get("timeout_seconds"),
@@ -135,8 +180,50 @@ class ComposerCliStrategy(BaseStrategy):
         if not isinstance(cli_command, str) or not cli_command.strip():
             cli_command = "agent"
         cli_command = cli_command.strip()
-        resolved_cli = shutil.which(cli_command)
+        resolved_cli = None
+        cli_path = Path(cli_command).expanduser()
+        if cli_path.is_file():
+            resolved_cli = str(cli_path.resolve())
+        if not resolved_cli and (cli_path.is_absolute() or "/" in cli_command or "\\" in cli_command):
+            config_file_path = optional_params.get("config_file_path")
+            if not config_file_path:
+                config_file_path = os.environ.get("LITELLM_CONFIG") or os.environ.get(
+                    "CONFIG_FILE_PATH"
+                )
+            if isinstance(config_file_path, str) and config_file_path:
+                try:
+                    config_dir = Path(config_file_path).expanduser().resolve().parent
+                    candidate = (config_dir / cli_path).resolve()
+                except Exception:
+                    candidate = None
+                if candidate and candidate.is_file():
+                    resolved_cli = str(candidate)
+            if not resolved_cli:
+                try:
+                    repo_root = Path(__file__).resolve().parents[2]
+                    candidate = (repo_root / cli_path).resolve()
+                except Exception:
+                    candidate = None
+                if candidate and candidate.is_file():
+                    resolved_cli = str(candidate)
         if not resolved_cli:
+            resolved_cli = shutil.which(cli_command)
+            if resolved_cli:
+                resolved_cli = str(Path(resolved_cli).resolve())
+        if not resolved_cli:
+            if io_log_path:
+                _write_cli_io_log(
+                    io_log_path,
+                    prompt=prompt,
+                    stdout_text="",
+                    stderr_text=f"Command not found: {cli_command}",
+                    meta={
+                        "model": model_name,
+                        "command": f"{cli_command} -p <prompt> --model {model_name} --mode=ask",
+                        "timeout": False,
+                        "exit_code": None,
+                    },
+                )
             if trace_recorder:
                 trace_recorder.add_node(
                     step_type="llm_call",
@@ -165,6 +252,7 @@ class ComposerCliStrategy(BaseStrategy):
             str(model_name),
             "--mode=ask",
         ]
+        command_preview = f"{resolved_cli} -p <prompt> --model {model_name} --mode=ask"
 
         start = time.time()
         try:
@@ -181,6 +269,8 @@ class ComposerCliStrategy(BaseStrategy):
             duration = time.time() - start
             stdout_bytes = exc.stdout or b""
             stderr_bytes = exc.stderr or b""
+            stdout_full = stdout_bytes.decode("utf-8", errors="replace")
+            stderr_full = stderr_bytes.decode("utf-8", errors="replace")
             stdout_limited, stdout_truncated = _limit_bytes(
                 stdout_bytes, max_output_bytes
             )
@@ -206,6 +296,20 @@ class ComposerCliStrategy(BaseStrategy):
                         "stderr_truncated": stderr_truncated,
                     },
                 )
+            if io_log_path:
+                _write_cli_io_log(
+                    io_log_path,
+                    prompt=prompt,
+                    stdout_text=stdout_full,
+                    stderr_text=stderr_full,
+                    meta={
+                        "model": model_name,
+                        "command": command_preview,
+                        "timeout": True,
+                        "duration_seconds": round(duration, 3),
+                        "exit_code": None,
+                    },
+                )
             raise TimeoutError(
                 f"Composer CLI timed out after {timeout_seconds}s."
             ) from exc
@@ -213,11 +317,28 @@ class ComposerCliStrategy(BaseStrategy):
         duration = time.time() - start
         stdout_bytes = result.stdout or b""
         stderr_bytes = result.stderr or b""
+        stdout_full = stdout_bytes.decode("utf-8", errors="replace")
+        stderr_full = stderr_bytes.decode("utf-8", errors="replace")
 
         stdout_limited, stdout_truncated = _limit_bytes(stdout_bytes, max_output_bytes)
         stderr_limited, stderr_truncated = _limit_bytes(stderr_bytes, max_output_bytes)
         stdout_text = stdout_limited.decode("utf-8", errors="replace")
         stderr_text = stderr_limited.decode("utf-8", errors="replace")
+
+        if io_log_path:
+            _write_cli_io_log(
+                io_log_path,
+                prompt=prompt,
+                stdout_text=stdout_full,
+                stderr_text=stderr_full,
+                meta={
+                    "model": model_name,
+                    "command": command_preview,
+                    "timeout": False,
+                    "duration_seconds": round(duration, 3),
+                    "exit_code": result.returncode,
+                },
+            )
 
         if trace_recorder:
             trace_recorder.add_node(

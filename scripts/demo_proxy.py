@@ -6,7 +6,7 @@ import textwrap
 import time
 import urllib.error
 import urllib.request
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 
 class Colors:
@@ -88,6 +88,27 @@ def _extract_reasoning(payload: Dict[str, Any]) -> str:
         return ""
 
 
+def _extract_error_message(text: str) -> str:
+    try:
+        payload = json.loads(text)
+    except Exception:
+        return text
+    if isinstance(payload, dict):
+        error = payload.get("error")
+        if isinstance(error, dict) and isinstance(error.get("message"), str):
+            return error["message"]
+    return text
+
+
+def _maybe_skip_reason(text: str) -> Optional[str]:
+    message = _extract_error_message(text).lower()
+    if "openai_api_key" in message or "api_key client option must be set" in message:
+        return "OPENAI_API_KEY is not configured"
+    if "composer cli command not found" in message or "no such file or directory" in message:
+        return "Composer CLI command not found"
+    return None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Pretty proxy demo for composite models")
     parser.add_argument("--base-url", default="http://localhost:4000", help="Proxy base URL")
@@ -152,6 +173,20 @@ def main() -> int:
         elapsed = time.time() - start
 
         if status != 200:
+            skip_reason = _maybe_skip_reason(text)
+            if skip_reason:
+                print(f"{Colors.YELLOW}⚠ Skipped: {skip_reason}{Colors.RESET}")
+                results.append(
+                    {
+                        "model": model,
+                        "status": status,
+                        "ok": False,
+                        "skipped": True,
+                        "reason": skip_reason,
+                    }
+                )
+                print()
+                continue
             print(f"{Colors.RED}✗ HTTP {status}{Colors.RESET}")
             print(_format_block(text))
             results.append({"model": model, "status": status, "ok": False})
@@ -192,7 +227,10 @@ def main() -> int:
     print(f"{Colors.BOLD}{Colors.HEADER}📊 SUMMARY{Colors.RESET}")
     print(f"{Colors.HEADER}{rule}{Colors.RESET}")
     for item in results:
-        status_icon = f"{Colors.GREEN}✓{Colors.RESET}" if item["ok"] else f"{Colors.RED}✗{Colors.RESET}"
+        if item.get("skipped"):
+            status_icon = f"{Colors.YELLOW}⚠{Colors.RESET}"
+        else:
+            status_icon = f"{Colors.GREEN}✓{Colors.RESET}" if item["ok"] else f"{Colors.RED}✗{Colors.RESET}"
         if item.get("ok") and item.get("content"):
             answer = str(item["content"]).strip().split("\n")[-1]
             if len(answer) > 100:
@@ -200,10 +238,14 @@ def main() -> int:
             print(
                 f"  {status_icon} {item['model']} (HTTP {item['status']}) → {answer}"
             )
+        elif item.get("skipped"):
+            print(
+                f"  {status_icon} {item['model']} (HTTP {item['status']}) → skipped: {item.get('reason', '')}"
+            )
         else:
             print(f"  {status_icon} {item['model']} (HTTP {item['status']})")
 
-    return 0 if all(item["ok"] for item in results) else 1
+    return 0 if all(item.get("ok") or item.get("skipped") for item in results) else 1
 
 
 if __name__ == "__main__":
